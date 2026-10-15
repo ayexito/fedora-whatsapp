@@ -23,6 +23,9 @@ async function runtimeHarness(t, respond = async () => ({ response: 1 })) {
       });
     }
     isDestroyed() { return this.webContents.destroyed; }
+    isMinimized() { return false; }
+    show() {}
+    focus() {}
     async loadURL(url) { this.webContents.url = url; }
   }
   const electron = {
@@ -52,7 +55,7 @@ async function runtimeHarness(t, respond = async () => ({ response: 1 })) {
   });
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(failures, [], 'Runtime failed to start in the permission fixture');
-  return { handlers, prompts, menus, window,
+  return { handlers, prompts, menus, window, stdin,
     request(permission, details = {}, contents = window.webContents) {
       return new Promise(resolve => handlers.request(contents, permission, resolve, {
         isMainFrame: true, requestingUrl: 'https://web.whatsapp.com/', ...details,
@@ -106,6 +109,26 @@ test('microphone access asks for consent and then becomes available to WhatsApp'
   assert.match(app.prompts[0].message, /https:\/\/web\.whatsapp\.com.*microphone/);
 });
 
+test('native controls can request consent without a web permission request', async t => {
+  for (const source of ['microphone', 'caméra', 'pipe']) {
+    for (const response of [0, 1]) {
+      const app = await runtimeHarness(t, async () => ({ response }));
+      assert.equal(app.check('media', { mediaType: 'audio' }), false);
+      if (source === 'pipe') app.stdin.emit('data', 'media\n');
+      else {
+        const item = app.menus[0][0].submenu.find(item => item.label?.startsWith('Autoriser') && item.label.endsWith(`${source}…`));
+        assert.ok(item, 'A native permission control must be available when the web page never asks');
+        item.click();
+      }
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(app.prompts.length, 1, 'The native control must open a consent dialog');
+      assert.equal(app.check('media', { mediaType: 'audio' }), response === 1);
+      assert.equal(app.check('media', { mediaType: 'video' }), response === 1 && source !== 'microphone');
+      assert.equal(app.window.webContents.reloads, response);
+    }
+  }
+});
+
 test('camera and speaker selection require their own explicit grants', async t => {
   const app = await runtimeHarness(t);
   assert.equal(await app.request('media', { mediaTypes: ['audio', 'video'] }), true);
@@ -140,6 +163,8 @@ test('other origins, frames, permissions and malformed media requests stay block
   assert.equal(await app.request('media', { mediaTypes: ['audio'] }, null), false);
   app.window.webContents.url = 'https://evil.test/';
   assert.equal(await app.request('media', { mediaTypes: ['audio'] }), false);
+  app.stdin.emit('data', 'media\n');
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(app.prompts.length, 0);
   app.window.webContents.url = 'https://web.whatsapp.com/';
   assert.equal(await app.request('media', { mediaTypes: ['audio'] }), true);

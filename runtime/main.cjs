@@ -42,7 +42,7 @@ async function boot() {
   app.setPath('sessionData', profile);
   app.setDesktopName(`${process.env.WA_DESKTOP_ID}.desktop`);
   app.enableSandbox();
-  let window;
+  let window, requestMedia;
   if (!app.requestSingleInstanceLock()) { app.quit(); return; }
   const focus = () => {
     if (window && !window.isDestroyed()) {
@@ -69,6 +69,7 @@ async function boot() {
       if (command === 'quit') app.quit();
       else if (command === 'focus') focus();
       else if (command === 'reload' && window && !window.isDestroyed()) window.webContents.reload();
+      else if (command === 'media') requestMedia?.(['audio', 'video']);
     }
   });
   process.stdin.on('end', () => app.quit());
@@ -97,7 +98,7 @@ async function boot() {
     return permission === 'media' && ['audio', 'video'].includes(details.mediaType)
       && mediaGrants.has(details.mediaType);
   });
-  browserSession.setPermissionRequestHandler((contents, permission, callback, details) => {
+  const requestPermission = (contents, permission, callback, details) => {
     const types = permission === 'speaker-selection' ? ['speaker']
       : permission === 'media' && Array.isArray(details?.mediaTypes)
         && details.mediaTypes.every(type => ['audio', 'video'].includes(type)) ? [...new Set(details.mediaTypes)] : [];
@@ -127,7 +128,16 @@ async function boot() {
       } catch { allowed = false; }
       callback(allowed);
     }).catch(() => {});
-  });
+  };
+  browserSession.setPermissionRequestHandler(requestPermission);
+  // A denied permission query can stop the web client from requesting consent itself.
+  requestMedia = mediaTypes => {
+    if (window.isDestroyed()) return;
+    focus();
+    requestPermission(window.webContents, 'media', allowed => {
+      if (allowed) window.webContents.reload();
+    }, { isMainFrame: true, requestingUrl: window.webContents.getURL(), mediaTypes });
+  };
   window.webContents.on('did-start-navigation', details => {
     if (details.isMainFrame && !details.isSameDocument) permissionGeneration++;
   });
@@ -145,6 +155,8 @@ async function boot() {
     { label: 'Application', submenu: [
       { label: 'Recharger', accelerator: 'CommandOrControl+R', click: () => window.webContents.reload() },
       { label: 'À propos', click: () => process.stdout.write('about\n') },
+      { label: 'Autoriser le microphone…', accelerator: 'CommandOrControl+Shift+M', click: () => requestMedia(['audio']) },
+      { label: 'Autoriser le microphone et la caméra…', accelerator: 'CommandOrControl+Shift+V', click: () => requestMedia(['audio', 'video']) },
       { label: 'Révoquer les autorisations audio/vidéo et recharger', click: () => {
         mediaGrants.clear(); permissionGeneration++; window.webContents.reload();
       } },

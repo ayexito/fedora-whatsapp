@@ -177,6 +177,11 @@ fn main() -> glib::ExitCode {
     let slot: ProcessSlot = Rc::new(RefCell::new(None));
     for (name, command, accelerator) in [
         ("reload", b"reload\n".as_slice(), "<Control>r"),
+        (
+            "media-permissions",
+            b"media\n".as_slice(),
+            "<Control><Shift>v",
+        ),
         ("quit", b"quit\n".as_slice(), "<Control>q"),
     ] {
         let action = gio::SimpleAction::new(name, None);
