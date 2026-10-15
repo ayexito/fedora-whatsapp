@@ -75,8 +75,6 @@ async function boot() {
   process.on('SIGTERM', () => app.quit());
   await app.whenReady();
   const browserSession = session.defaultSession;
-  browserSession.setPermissionCheckHandler(() => false);
-  browserSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   browserSession.setDevicePermissionHandler(() => false);
   // Downloads require the user-selected destination implemented in Stage 2.
   browserSession.on('will-download', event => event.preventDefault());
@@ -85,6 +83,53 @@ async function boot() {
     show: true, autoHideMenuBar: true,
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#111b21' : '#f7f5f3',
     webPreferences: WEB_PREFERENCES,
+  });
+  const mediaGrants = new Set();
+  let permissionGeneration = 0, permissionQueue = Promise.resolve();
+  const mediaContext = (contents, details) => contents === window.webContents
+    && !window.isDestroyed() && !contents.isDestroyed()
+    && details?.isMainFrame === true && trustedURL(details.requestingUrl)
+    && trustedURL(contents.getURL());
+  browserSession.setPermissionCheckHandler((contents, permission, origin, details) => {
+    if (!mediaContext(contents, details) || !trustedURL(origin)
+      || (details.securityOrigin && !trustedURL(details.securityOrigin))) return false;
+    if (permission === 'speaker-selection') return mediaGrants.has('speaker');
+    return permission === 'media' && ['audio', 'video'].includes(details.mediaType)
+      && mediaGrants.has(details.mediaType);
+  });
+  browserSession.setPermissionRequestHandler((contents, permission, callback, details) => {
+    const types = permission === 'speaker-selection' ? ['speaker']
+      : permission === 'media' && Array.isArray(details?.mediaTypes)
+        && details.mediaTypes.every(type => ['audio', 'video'].includes(type)) ? [...new Set(details.mediaTypes)] : [];
+    if (!types.length || !mediaContext(contents, details)) { callback(false); return; }
+    const generation = permissionGeneration, url = contents.getURL();
+    const current = () => generation === permissionGeneration
+      && mediaContext(contents, details) && contents.getURL() === url;
+    // Serialize prompts; grants last only for this process and never cover other origins.
+    permissionQueue = permissionQueue.then(async () => {
+      let allowed = false;
+      try {
+        if (current()) {
+          const missing = types.filter(type => !mediaGrants.has(type));
+          if (!missing.length) allowed = true;
+          else {
+            const labels = { audio: 'microphone', video: 'caméra', speaker: 'choix des haut-parleurs' };
+            const { response } = await dialog.showMessageBox(window, {
+              type: 'question', title: TITLE,
+              message: `Autoriser https://web.whatsapp.com à utiliser : ${missing.map(type => labels[type]).join(', ')} ?`,
+              detail: 'Valable jusqu’à la fermeture de l’application. Le menu Application permet de révoquer ces autorisations et de recharger la page.',
+              buttons: ['Refuser', 'Autoriser'], defaultId: 0, cancelId: 0, noLink: true,
+            });
+            allowed = response === 1 && current();
+            if (allowed) missing.forEach(type => mediaGrants.add(type));
+          }
+        }
+      } catch { allowed = false; }
+      callback(allowed);
+    }).catch(() => {});
+  });
+  window.webContents.on('did-start-navigation', details => {
+    if (details.isMainFrame && !details.isSameDocument) permissionGeneration++;
   });
   window.on('page-title-updated', event => { event.preventDefault(); window.setTitle(TITLE); });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -100,6 +145,9 @@ async function boot() {
     { label: 'Application', submenu: [
       { label: 'Recharger', accelerator: 'CommandOrControl+R', click: () => window.webContents.reload() },
       { label: 'À propos', click: () => process.stdout.write('about\n') },
+      { label: 'Révoquer les autorisations audio/vidéo et recharger', click: () => {
+        mediaGrants.clear(); permissionGeneration++; window.webContents.reload();
+      } },
       { type: 'separator' },
       { label: 'Quitter', accelerator: 'CommandOrControl+Q', click: () => app.quit() },
     ] },

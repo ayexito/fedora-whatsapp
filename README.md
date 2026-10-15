@@ -20,7 +20,7 @@ Version 0.1.0 is an early build. You need to build it from source for now.
 
 I've checked startup, the official login screen, saved sessions, opening the app from the launcher, reusing one window, and the renderer sandbox on Fedora 44 x86_64 with Hyprland Wayland. I also reopened a linked account across restarts and tested navigation and scrolling.
 
-The app has reload/quit shortcuts and a native About dialog. Closing the window quits it. Notifications, attachment downloads, external links, preferences, tray/background mode and microphone/camera permissions still need work. Downloads, popups, external navigation and web permission requests are currently blocked.
+The app has reload/quit shortcuts, a native About dialog and permission prompts for the microphone, camera and speaker selection. Closing the window quits it. Notifications, attachment downloads, external links, preferences and tray/background mode still need work. Downloads, popups, external navigation and other web permission requests are currently blocked.
 
 Sending and receiving messages, voice/video calls, GNOME Wayland, X11 and long-running use still need testing. There is no RPM or Flatpak package yet.
 
@@ -94,8 +94,10 @@ cargo test --locked
 node --test tests/security.test.cjs
 ```
 
-These tests check private storage permissions, trusted URLs and renderer isolation settings. They do not verify message delivery or calling. After building, check login, restart persistence, typing, resizing and reconnection on your own machine.
+These tests check private storage permissions, trusted URLs, renderer isolation and the media permission handlers. They cover consent, denial, revocation and requests from untrusted origins. They do not verify message delivery or calling. After building, check login, restart persistence, typing, resizing and reconnection on your own machine.
 
 If scrolling is slow, close the app and create an empty `software-rendering` file inside its private Chromium profile. Remove only that file, with the app closed, to restore hardware acceleration. This helped on the tested Intel/NVIDIA Hyprland setup; other profiles keep hardware acceleration by default. Video CPU use and battery effects still need testing.
 
-Microphone and camera requests are denied for now, so calls and voice recording aren't ready. WebRTC support alone doesn't prove WhatsApp calls work.
+When WhatsApp requests the microphone or camera, choose **Autoriser** (Allow) or **Refuser** (Deny) in the native dialog. Speaker selection has a separate permission. Grants last until you quit the app. Press Alt to show the menu, then use **Application → Révoquer les autorisations audio/vidéo et recharger** to revoke them and stop media by reloading the page.
+
+Use WhatsApp's own device selector when available, or Fedora's sound settings for the default microphone and output. Actual calls still depend on WhatsApp Web supporting them for your account and browser. Permissions alone do not establish working voice/video calls.
