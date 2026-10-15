@@ -1,0 +1,42 @@
+/target/
+/dist/
+__pycache__/
+node_modules/
+
+# Keep local research, diagnostics and internal notes out of publication.
+/.ecc/
+/research/
+/DESIGN.md
+/PERFORMANCE.md
+/VERIFICATION.md
+/design-contract.md
+/implementation-handoff.md
+/tests/native_smoke.py
+/tests/rendering_smoke.cjs
+
+# Local credentials, logs and crash dumps are never publication inputs.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.log
+*.dmp
+
+# Browser profiles can contain the linked account's authentication material.
+/profile/
+/profiles/
+/chromium/
+/session/
+/sessions/
+/io.github.whatsapp_fedora.Desktop/
+Cookies
+Cookies-*
+cookies.sqlite*
+Local State
+Login Data*
+IndexedDB/
+Local Storage/
+Session Storage/
+Service Worker/

@@ -1,0 +1,7 @@
+target/
+dist/
+node_modules/
+.ecc/
+research/
+.git/
+__pycache__/

@@ -1,0 +1,15 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=WhatsApp for Fedora
+Name[fr]=WhatsApp pour Fedora
+GenericName=Unofficial WhatsApp client
+GenericName[fr]=Client WhatsApp non officiel
+Comment=Unofficial desktop client for the official WhatsApp Web service
+Comment[fr]=Client de bureau non officiel pour le service officiel WhatsApp Web
+Exec=whatsapp-desktop
+Icon=io.github.whatsapp_fedora.Desktop
+Terminal=false
+Categories=Network;InstantMessaging;
+Keywords=WhatsApp;Chat;Messaging;
+StartupWMClass=io.github.whatsapp_fedora.Desktop
