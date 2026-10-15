@@ -72,7 +72,7 @@ fn send_command(process: &gio::Subprocess, command: &'static [u8]) {
 
 fn show_about(app: &adw::Application) {
     let dialog = adw::AboutWindow::builder()
-        .application(app).application_name("WhatsApp pour Fedora — non officiel")
+        .application(app).application_name("Fedora WhatsApp — non officiel")
         .application_icon("chat-message-new-symbolic")
         .version(env!("CARGO_PKG_VERSION"))
         .comments("Client indépendant et non officiel pour WhatsApp Web, sans affiliation à Meta. La messagerie et sa sécurité sont fournies par le client officiel WhatsApp.")
@@ -101,7 +101,7 @@ fn read_events(stream: gio::DataInputStream, app: glib::WeakRef<adw::Application
 fn show_error(app: &adw::Application, detail: &str) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
-        .title("WhatsApp pour Fedora — non officiel")
+        .title("Fedora WhatsApp — non officiel")
         .default_width(640)
         .default_height(420)
         .build();
@@ -173,6 +173,7 @@ fn start_runtime(
 }
 
 fn main() -> glib::ExitCode {
+    glib::set_application_name("Fedora WhatsApp");
     let app = adw::Application::builder().application_id(APP_ID).build();
     let slot: ProcessSlot = Rc::new(RefCell::new(None));
     for (name, command, accelerator) in [

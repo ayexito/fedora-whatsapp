@@ -84,7 +84,9 @@ async function runtimeHarness(t, respond = async () => ({ response: 1 })) {
 test('browser identity preserves the actual Linux Chromium engine', () => {
   const prefix = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko)';
   const browser = `${prefix} Chrome/152.0.7977.149 Safari/537.36`;
-  assert.equal(chromiumUserAgent(`${prefix} WhatsApppourFedora/0.0 Chrome/152.0.7977.149 Electron/44.7.2 Safari/537.36`), browser);
+  for (const product of ['FedoraWhatsApp', 'WhatsApppourFedora']) {
+    assert.equal(chromiumUserAgent(`${prefix} ${product}/0.0 Chrome/152.0.7977.149 Electron/44.7.2 Safari/537.36`), browser);
+  }
   assert.equal(chromiumUserAgent(browser), browser);
 });
 

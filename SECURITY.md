@@ -12,4 +12,4 @@ Attachment downloads require the official WhatsApp Web origin as initiator in th
 
 Microphone, camera and speaker-selection access requires consent in a native dialog, limited to the official WhatsApp Web page in the main window. Other origins, subframes and permission types are denied. Media grants are kept only in memory until exit; the Application menu can revoke them and reload the page. Requests lose validity if their document navigates or permissions are revoked before consent completes.
 
-Report security problems privately through [GitHub's vulnerability reporting page](https://github.com/ayexito/whatsapp-for-fedora/security). Do not attach account data to public issues.
+Report security problems privately through [GitHub's vulnerability reporting page](https://github.com/ayexito/fedora-whatsapp/security). Do not attach account data to public issues.

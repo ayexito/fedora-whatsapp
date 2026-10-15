@@ -1,11 +1,11 @@
 'use strict';
 
 const HOME = 'https://web.whatsapp.com/';
-const TITLE = 'WhatsApp pour Fedora — non officiel';
+const TITLE = 'Fedora WhatsApp — non officiel';
 
 function chromiumUserAgent(value) {
   // Branded desktop tokens trigger WhatsApp's browser rejection; retain the actual Linux Chromium identity.
-  return value.replace(/\s(?:WhatsApppourFedora|Electron)\/[^\s]+/g, '');
+  return value.replace(/\s(?:FedoraWhatsApp|WhatsApppourFedora|Electron)\/[^\s]+/g, '');
 }
 
 function trustedURL(value) {
@@ -36,7 +36,7 @@ async function boot() {
   }
   // Keep the graphics-driver workaround local to the affected profile.
   if (fs.existsSync(path.join(profile, 'software-rendering'))) app.disableHardwareAcceleration();
-  app.setName('WhatsApp pour Fedora');
+  app.setName('Fedora WhatsApp');
   app.userAgentFallback = chromiumUserAgent(app.userAgentFallback);
   app.setPath('userData', profile);
   app.setPath('sessionData', profile);

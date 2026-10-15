@@ -1,16 +1,16 @@
-# WhatsApp for Fedora
+# Fedora WhatsApp
 
 I built this to use WhatsApp on Fedora. It opens the official [WhatsApp Web](https://web.whatsapp.com/) client in its own window and keeps your login between restarts. Rust handles the launcher, GTK4/libadwaita handles native dialogs, and Electron/Chromium runs the web client.
 
 This is an unofficial project. It has no affiliation with WhatsApp, Meta or the Fedora Project.
 
-![WhatsApp for Fedora showing the login page with the QR code hidden](docs/images/whatsapp-for-fedora.png)
+![Fedora WhatsApp showing the login page with the QR code hidden](docs/images/whatsapp-for-fedora.png)
 
 *The login screen in the app. I hid the QR code for the screenshot. No account was linked.*
 
 ## Other Linux distros
 
-If you want to use it on another Linux distro, you can ask Codex or Claude Code to help make it work there. If you don't have either or want me to do it, [contact me by opening an issue](https://github.com/ayexito/whatsapp-for-fedora/issues/new) with your distro and version. I'll adapt it for you.
+If you want to use it on another Linux distro, you can ask Codex or Claude Code to help make it work there. If you don't have either or want me to do it, [contact me by opening an issue](https://github.com/ayexito/fedora-whatsapp/issues/new) with your distro and version. I'll adapt it for you.
 
 Only Fedora 44 x86_64 has been tested so far. Each port needs to be built and checked on its target distro.
 
@@ -30,8 +30,8 @@ Open a terminal and run these commands. `sudo dnf` installs the dependencies; th
 
 ```sh
 sudo dnf install git cargo rust rustfmt gcc pkgconf-pkg-config gtk4-devel libadwaita-devel nodejs npm gtk3 nss alsa-lib cups-libs libdrm mesa-libgbm desktop-file-utils
-git clone https://github.com/ayexito/whatsapp-for-fedora.git
-cd whatsapp-for-fedora
+git clone https://github.com/ayexito/fedora-whatsapp.git
+cd fedora-whatsapp
 npm install --global --prefix "$HOME/.local/npm-global" electron@44.7.2
 cargo build --locked
 ```
@@ -47,7 +47,7 @@ update-desktop-database "$HOME/.local/share/applications"
 gtk-update-icon-cache --force --ignore-theme-index "$HOME/.local/share/icons/hicolor"
 ```
 
-Search for "WhatsApp for Fedora" or "WhatsApp pour Fedora" in your launcher. You can also start it with:
+Search for "Fedora WhatsApp" in your launcher. You can also start it with:
 
 ```sh
 "$HOME/.local/bin/whatsapp-desktop"
