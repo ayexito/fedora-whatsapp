@@ -23,7 +23,7 @@ const WEB_PREFERENCES = Object.freeze({
 });
 
 async function boot() {
-  const { app, BrowserWindow, Menu, dialog, session, nativeTheme } = require('electron');
+  const { app, BrowserWindow, Menu, dialog, session, nativeTheme, shell } = require('electron');
   const fs = require('node:fs');
   const path = require('node:path');
   if (['no-sandbox', 'disable-web-security', 'ignore-certificate-errors', 'allow-insecure-localhost']
@@ -77,8 +77,33 @@ async function boot() {
   await app.whenReady();
   const browserSession = session.defaultSession;
   browserSession.setDevicePermissionHandler(() => false);
-  // Downloads require the user-selected destination implemented in Stage 2.
-  browserSession.on('will-download', event => event.preventDefault());
+  browserSession.on('will-download', (event, item, contents) => {
+    // The initiator identifies the page; attachment URLs may be blobs or CDN links.
+    if (!window || window.isDestroyed() || contents !== window.webContents
+      || !trustedURL(contents.getURL()) || !trustedURL(item.getInitiatorOrigin())) {
+      event.preventDefault(); return;
+    }
+    let filename = path.basename(item.getFilename().replace(/\\/g, '/')).replace(/[\x00-\x1f\x7f]/g, '_');
+    if (!filename || filename === '.' || filename === '..') filename = 'pièce-jointe';
+    item.setSaveDialogOptions({
+      title: 'Enregistrer la pièce jointe', buttonLabel: 'Enregistrer',
+      defaultPath: path.join(app.getPath('downloads'), filename),
+      properties: ['showOverwriteConfirmation'],
+    });
+    item.once('done', (_event, state) => {
+      if (window.isDestroyed() || state === 'cancelled') return;
+      const completed = state === 'completed', savedPath = completed ? item.getSavePath() : '';
+      dialog.showMessageBox(window, {
+        type: completed ? 'info' : 'error', title: TITLE,
+        message: completed ? 'Téléchargement terminé' : 'Téléchargement interrompu',
+        detail: completed ? path.basename(savedPath) : 'Vérifiez votre connexion et l’espace disque, puis réessayez depuis WhatsApp.',
+        buttons: completed ? ['Fermer', 'Afficher dans le dossier'] : ['Fermer'],
+        defaultId: 0, cancelId: 0, noLink: true,
+      }).then(({ response }) => {
+        if (completed && response === 1) shell.showItemInFolder(savedPath);
+      }).catch(() => {});
+    });
+  });
   window = new BrowserWindow({
     title: TITLE, width: 1280, height: 820, minWidth: 800, minHeight: 600,
     show: true, autoHideMenuBar: true,

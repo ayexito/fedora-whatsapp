@@ -11,7 +11,7 @@ const { trustedURL, chromiumUserAgent, WEB_PREFERENCES } = require('../runtime/m
 async function runtimeHarness(t, respond = async () => ({ response: 1 })) {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsapp-permissions-'));
   t.after(() => fs.rmSync(profile, { recursive: true, force: true }));
-  const handlers = {}, prompts = [], menus = [], failures = [];
+  const handlers = {}, prompts = [], menus = [], failures = [], revealed = [];
   let window;
   class Window extends EventEmitter {
     constructor() {
@@ -32,6 +32,7 @@ async function runtimeHarness(t, respond = async () => ({ response: 1 })) {
     app: Object.assign(new EventEmitter(), {
       commandLine: { hasSwitch: () => false }, userAgentFallback: 'Chromium',
       setName() {}, setPath() {}, setDesktopName() {}, enableSandbox() {},
+      getPath: () => path.join(profile, 'downloads'),
       requestSingleInstanceLock: () => true, whenReady: async () => {},
     }),
     BrowserWindow: Window,
@@ -42,6 +43,7 @@ async function runtimeHarness(t, respond = async () => ({ response: 1 })) {
     }) },
     Menu: { buildFromTemplate: value => value, setApplicationMenu: value => menus.push(value) },
     dialog: { async showMessageBox(parent, options) { assert.equal(parent, window); prompts.push(options); return respond(options); } },
+    shell: { showItemInFolder: file => revealed.push(file) },
     nativeTheme: { shouldUseDarkColors: false },
   };
   const stdin = Object.assign(new EventEmitter(), { setEncoding() {} });
@@ -55,7 +57,17 @@ async function runtimeHarness(t, respond = async () => ({ response: 1 })) {
   });
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(failures, [], 'Runtime failed to start in the permission fixture');
-  return { handlers, prompts, menus, window, stdin,
+  return { handlers, prompts, menus, window, stdin, revealed,
+    download(options = {}, contents = window.webContents) {
+      const item = Object.assign(new EventEmitter(), {
+        getInitiatorOrigin: () => 'https://web.whatsapp.com',
+        getFilename: () => 'attachment.pdf', getSavePath: () => path.join(profile, 'chosen.pdf'),
+        setSaveDialogOptions(options) { this.saveOptions = options; }, ...options,
+      });
+      const event = { prevented: false, preventDefault() { this.prevented = true; } };
+      electron.session.defaultSession.emit('will-download', event, item, contents);
+      return { item, event };
+    },
     request(permission, details = {}, contents = window.webContents) {
       return new Promise(resolve => handlers.request(contents, permission, resolve, {
         isMainFrame: true, requestingUrl: 'https://web.whatsapp.com/', ...details,
@@ -94,6 +106,53 @@ test('remote pages have no native runtime access', () => {
   assert.equal(WEB_PREFERENCES.webSecurity, true);
   assert.equal(WEB_PREFERENCES.webviewTag, false);
   assert.equal('preload' in WEB_PREFERENCES, false);
+});
+
+test('WhatsApp attachments reach the native save dialog instead of being cancelled', async t => {
+  const app = await runtimeHarness(t);
+  const { item, event } = app.download();
+  assert.equal(event.prevented, false, 'Attachment download was cancelled before the save dialog');
+  assert.equal(path.basename(item.saveOptions.defaultPath), 'attachment.pdf');
+  assert.equal(path.basename(path.dirname(item.saveOptions.defaultPath)), 'downloads');
+  assert.ok(item.saveOptions.properties.includes('showOverwriteConfirmation'));
+});
+
+test('downloads require the official initiator and main application window', async t => {
+  const app = await runtimeHarness(t);
+  for (const origin of ['', 'null', 'https://evil.test', 'http://web.whatsapp.com', 'https://web.whatsapp.com.evil.test']) {
+    const { event, item } = app.download({ getInitiatorOrigin: () => origin });
+    assert.equal(event.prevented, true, origin);
+    assert.equal(item.saveOptions, undefined);
+  }
+  assert.equal(app.download({}, null).event.prevented, true);
+  assert.equal(app.download({}, { getURL: () => 'https://web.whatsapp.com/' }).event.prevented, true);
+  app.window.webContents.url = 'https://evil.test/';
+  assert.equal(app.download().event.prevented, true);
+  app.window.webContents.url = 'https://web.whatsapp.com/';
+  app.window.webContents.destroyed = true;
+  assert.equal(app.download().event.prevented, true);
+});
+
+test('suggested attachment names cannot escape the Downloads folder', async t => {
+  const app = await runtimeHarness(t);
+  for (const filename of ['../../document.pdf', '..\\..\\photo.png', '/', '.', '..', '', 'photo\n.png']) {
+    const { item } = app.download({ getFilename: () => filename });
+    assert.equal(path.basename(path.dirname(item.saveOptions.defaultPath)), 'downloads');
+    assert.doesNotMatch(path.basename(item.saveOptions.defaultPath), /[\\\x00-\x1f\x7f]/);
+  }
+});
+
+test('download completion offers the saved file folder, failures explain retry, cancellation stays quiet', async t => {
+  for (const state of ['completed', 'interrupted', 'cancelled']) {
+    const app = await runtimeHarness(t);
+    const { item } = app.download();
+    item.emit('done', {}, state);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(app.prompts.length, state === 'cancelled' ? 0 : 1);
+    assert.deepEqual(app.revealed, state === 'completed' ? [item.getSavePath()] : []);
+    if (state === 'completed') assert.equal(app.prompts[0].defaultId, 0);
+    if (state === 'interrupted') assert.equal(app.prompts[0].type, 'error');
+  }
 });
 
 test('microphone access asks for consent and then becomes available to WhatsApp', async t => {
