@@ -2,6 +2,8 @@
 
 const HOME = 'https://web.whatsapp.com/';
 const TITLE = 'Fedora WhatsApp — non officiel';
+// PNG rendition of data/io.github.whatsapp_fedora.Desktop.svg for the native tray.
+const TRAY_ICON = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAFUUlEQVRYw6XXW4xdZRUH8N+3z+l0oJVaW2mqomhnhqAz0yFqUAwPEn0wGAkxivEWgxZaFaP44gOJ0XhDJTUp0WmLEZREEbUKUn1Qn4h3aKYzdHRGp1AkFS1ip4N0Lud8Ppy1z9kz0+lQXcnO/vZtrfWt9V//tXZyjtI7esOZHyRkJgf2nZO+tNoLPZM3SadnOxZCciYlNZhPubEmL1dVz/PGB7/1vzuweLcZaQuGcBlegY2h4yQexQgOpXrj8bxQa395tqik1Q2DPrwP18R67Qr6FnAUB3HXif7hQ5vHdrYMpWyif//qDlxyeKdmapaX5+N6fBzb4t40/oIp/DNC8wK8HL2xhuP4Bm7H06DJ5PZ9KzvQe+R6GvXy8kJ8Ce9HDY/jHvwY4xH2Rrxb4HnowdV4Ny6JZz/BzeEwKZusRKK+yJ2O8Rfi63h7GPkuvpgZXQE0zXDooTjuxicjetdgQ6yPWgLW9lUl793YjZ2Yxa34Mp6p2pscuGM17KzBjfg8LsCBcOLfVWAWVYyHvCtezPgqPrfYeOuz3tEblzkwObBPozZXXs4rarfjltjItdiVYs894WxReh6heAk+gS7cFzufD4WXxY6GlrlckalX3tkpu2YD9uKueLwry/3V0BdQ5Dbqr8UgTkTop+P+UOBgOIC5DraNfMhKUqn9OdwWILwI71kcSzRTAevDAXgAv2/tIsGOCqrfgMuhKApnk3oui8QEvh/rt2LLIgdCtsXuF6J0Wl8XeV3cL2U93klalcbHB79ZvfwpTkWpDkDv2A5F75E2ci/FpiCQkcqHDZxeontuJQwslfOaz5bLPwdLdpcOtPbX2cdL43w8MCC1jJzGgxWdD0d1PCcPDm//Trk8iWOxfhnISZHaabIhztMBHLlDE9/DX2PdVU1d39iO5xQJ8kLJAbjg1NpWudYr+6jSKpjs36d37IYyfLcGr/fjM/gIZnJOK84IjSZTwf1JSrmju3n+XJeEYvrE+vL9f8V5YzShpa3q2yhJ/L3h0KbK825cFxVSh1rRYcfcYsbNpa1abuWw2LCxTXJTUQEvxlboG91RredZfDoaUoEPBze8KRz+IO6MEt6P1y2pss3RMUU3dWH3M4qJob3lC+N4Mrrg5VUMLNTbep7Cx4LZmngzfoif47MRhU34APZENEsZCqBP4zAcf3b9Ig8fa5NPqwueJ2r16KXD1XT8Ax/Fp/BENJorK3NA9b0Ib66FzrVh/AhMDe5d5MBchHceb8RbyuSVgJTaiJ3JfCV6/234U1k5AeY/4Asd/khX4G3x/AeYLsm/3gZbS/cvwsNX4+oiNX/UzB0fy0Gi0rxGpDwip93RrC4KDnkw+ESk5JY4H8K91VJbOg9sxS+DFW/G7tTGQquRTgwMg/6HbzK7ZtYqsk4rUrvwn2jz98w3Co8ODXci0NOp4/5A6jR+28lARpYrQ8fYwJ5Fls7ABVsCmGXL3BOA1VVrd99lKXh9IPmRGLMvxvZIySh+hhln+0FpfX9VgPTK0Dwck9ECTFTG9DptbHXjirj/fNyBVwUv1Cs94UBE54kIa46K2YrXxAx4VXTNU/haDDYzztBAUs/YLqnVt/vwqzBYlRNxXBxOijH779FgcpTilgrTNfDryP/BkubrTcaXjOX1lNs+vTZ2cTJY8SH8Js5PRnreEQz3ogBqVebxN/wxcn2wQu+6iqc9MnDvsnzVc25IrdliJpD/O0xSPNUiu7YcwP0Rob6ISPXX7FhMPsc6nJBRmBzYayWpxz+fmIIq0gwVSdGuAQvBmI+dtfhS/AUN7rea1LMcg0eHa8/1F/v/kf8CvkGu4ZoNXbEAAAAASUVORK5CYII=';
 
 function chromiumUserAgent(value) {
   // Branded desktop tokens trigger WhatsApp's browser rejection; retain the actual Linux Chromium identity.
@@ -23,7 +25,7 @@ const WEB_PREFERENCES = Object.freeze({
 });
 
 async function boot() {
-  const { app, BrowserWindow, WebContentsView, Menu, dialog, session, nativeTheme, shell, ipcMain } = require('electron');
+  const { app, BrowserWindow, WebContentsView, Tray, nativeImage, Menu, dialog, session, nativeTheme, shell, ipcMain } = require('electron');
   const fs = require('node:fs');
   const path = require('node:path');
   if (['no-sandbox', 'disable-web-security', 'ignore-certificate-errors', 'allow-insecure-localhost']
@@ -335,6 +337,15 @@ async function boot() {
     ] },
     { label: 'Édition', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
   ]));
+  const tray = new Tray(nativeImage.createFromDataURL(TRAY_ICON));
+  tray.setToolTip('Fedora WhatsApp');
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Ouvrir Fedora WhatsApp', click: focus },
+    { type: 'separator' },
+    { label: 'Quitter', click: () => app.quit() },
+  ]));
+  tray.on('click', focus);
+  app.on('will-quit', () => tray.destroy());
   let retryDialog = false;
   async function loadFailure() {
     if (retryDialog || !window || window.isDestroyed()) return;

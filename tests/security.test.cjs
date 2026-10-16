@@ -12,7 +12,7 @@ async function runtimeHarness(t, respond = async () => ({ response: 1 }), option
   const profile = options.profile || fs.mkdtempSync(path.join(os.tmpdir(), 'whatsapp-permissions-'));
   if (!options.profile) t.after(() => fs.rmSync(profile, { recursive: true, force: true }));
   const handlers = {}, prompts = [], menus = [], failures = [], revealed = [], links = [], opened = [], downloadURLs = [];
-  let window, view;
+  let window, view, tray;
   const makeContents = () => Object.assign(new EventEmitter(), {
     url: '', destroyed: false, reloads: 0, mainFrame: { url: '' },
     getURL() { return this.url; }, isDestroyed() { return this.destroyed; },
@@ -56,15 +56,22 @@ async function runtimeHarness(t, respond = async () => ({ response: 1 }), option
     }
     setBounds(bounds) { this.bounds = bounds; }
   }
+  class Tray extends EventEmitter {
+    constructor(icon) { super(); tray = this; this.icon = icon; }
+    setToolTip(value) { this.tooltip = value; }
+    setContextMenu(value) { this.menu = value; }
+    destroy() { this.destroyed = true; }
+  }
   const electron = {
     app: Object.assign(new EventEmitter(), {
       commandLine: { hasSwitch: () => false }, userAgentFallback: 'Chromium',
       setName() {}, setPath() {}, setDesktopName() {}, enableSandbox() {},
       getPath: () => path.join(profile, 'downloads'),
       requestSingleInstanceLock: () => true, whenReady: async () => {},
-      quit() { this.emit('before-quit'); window?.close(); },
+      quit() { this.emit('before-quit'); window?.close(); this.emit('will-quit'); },
     }),
-    BrowserWindow: Window, WebContentsView: Client, ipcMain: new EventEmitter(),
+    BrowserWindow: Window, WebContentsView: Client, Tray, ipcMain: new EventEmitter(),
+    nativeImage: { createFromDataURL: value => value },
     session: { defaultSession: Object.assign(new EventEmitter(), {
       setPermissionCheckHandler(fn) { handlers.check = fn; },
       setPermissionRequestHandler(fn) { handlers.request = fn; },
@@ -90,7 +97,7 @@ async function runtimeHarness(t, respond = async () => ({ response: 1 }), option
   });
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(failures, [], 'Runtime failed to start in the permission fixture');
-  return { handlers, prompts, menus, window, view, contents: view.webContents, ipc: electron.ipcMain, app: electron.app,
+  return { handlers, prompts, menus, window, view, tray, contents: view.webContents, ipc: electron.ipcMain, app: electron.app,
     stdin, revealed, links, opened, profile, downloadURLs,
     navigate(url, extra = {}, name = 'will-frame-navigate') {
       const event = { url, isMainFrame: true, initiator: view.webContents.mainFrame,
@@ -220,6 +227,29 @@ test('Close keeps the session alive, reopening restores it, and explicit Quit ex
     assert.equal(app.window.closed, true);
     assert.equal(app.contents.destroyed, true);
   }
+});
+
+test('the tray restores the same hidden or minimized window and offers a complete Quit', async t => {
+  const app = await runtimeHarness(t);
+  assert.ok(app.tray, 'A native tray icon must be created');
+  assert.equal(app.tray.tooltip, 'Fedora WhatsApp');
+  const png = Buffer.from(app.tray.icon.split(',')[1], 'base64');
+  assert.equal(png.subarray(1, 4).toString(), 'PNG');
+  assert.equal(png.readUInt32BE(16), 32);
+  assert.equal(png.readUInt32BE(20), 32);
+  app.window.close();
+  app.tray.emit('click');
+  assert.equal(app.window.visible, true);
+  assert.equal(app.contents.destroyed, false);
+  app.window.minimize();
+  app.window.close();
+  app.tray.menu.find(item => item.label === 'Ouvrir Fedora WhatsApp').click();
+  assert.equal(app.window.visible, true);
+  assert.equal(app.window.minimized, false);
+  app.tray.menu.find(item => item.label === 'Quitter').click();
+  assert.equal(app.window.closed, true);
+  assert.equal(app.contents.destroyed, true);
+  assert.equal(app.tray.destroyed, true);
 });
 
 test('the chat follows native content bounds after a compositor maximize or restore', async t => {
