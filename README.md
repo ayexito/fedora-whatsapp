@@ -16,7 +16,7 @@ Only Fedora 44 x86_64 has been tested so far. Each port needs to be built and ch
 
 ## Where it's at
 
-Version 0.1.0 is an early build. You need to build it from source for now.
+Version 0.1.1 is an early build. You need to build it from source for now.
 
 I've checked startup, the official login screen, saved sessions, opening the app from the launcher, reusing one window, and the renderer sandbox on Fedora 44 x86_64 with Hyprland Wayland. I also reopened a linked account across restarts and tested navigation and scrolling.
 
