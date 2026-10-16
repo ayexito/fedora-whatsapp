@@ -77,14 +77,36 @@ async function boot() {
   await app.whenReady();
   const browserSession = session.defaultSession;
   browserSession.setDevicePermissionHandler(() => false);
+  let pendingBlobDownload;
+  async function openFailure(message, detail = 'Vérifiez l’application par défaut dans les paramètres Fedora. Vous pouvez aussi ouvrir le fichier depuis son dossier.') {
+    if (!window.isDestroyed()) await dialog.showMessageBox(window, {
+      type: 'error', title: TITLE, message,
+      detail,
+      buttons: ['Fermer'], noLink: true,
+    }).catch(() => {});
+  }
+  const openableDocument = file => {
+    try {
+      const stat = fs.lstatSync(file);
+      return path.isAbsolute(file) && stat.isFile() && !stat.isSymbolicLink() && !(stat.mode & 0o111)
+        && /\.(pdf|docx?|xlsx?|pptx?|od[stpg]|rtf|txt|csv|png|jpe?g|webp|gif|mp[34]|m4[av]|ogg|opus|wav|webm|mov)$/i.test(file);
+    } catch { return false; }
+  };
   browserSession.on('will-download', (event, item, contents) => {
     // The initiator identifies the page; attachment URLs may be blobs or CDN links.
     if (!window || window.isDestroyed() || contents !== window.webContents
-      || !trustedURL(contents.getURL()) || !trustedURL(item.getInitiatorOrigin())) {
+      || !trustedURL(contents.getURL())) {
       event.preventDefault(); return;
     }
+    // Main-process blob downloads lack an initiator; authorize only the exact requested URL once.
+    const popupDownload = Boolean(pendingBlobDownload) && item.getURL() === pendingBlobDownload;
+    if (!trustedURL(item.getInitiatorOrigin()) && !(popupDownload && !item.getInitiatorOrigin())) {
+      event.preventDefault(); return;
+    }
+    if (popupDownload) pendingBlobDownload = undefined;
     let filename = path.basename(item.getFilename().replace(/\\/g, '/')).replace(/[\x00-\x1f\x7f]/g, '_');
     if (!filename || filename === '.' || filename === '..') filename = 'pièce-jointe';
+    if (popupDownload && item.getMimeType() === 'application/pdf' && !path.extname(filename)) filename += '.pdf';
     item.setSaveDialogOptions({
       title: 'Enregistrer la pièce jointe', buttonLabel: 'Enregistrer',
       defaultPath: path.join(app.getPath('downloads'), filename),
@@ -93,28 +115,58 @@ async function boot() {
     item.once('done', (_event, state) => {
       if (window.isDestroyed() || state === 'cancelled') return;
       const completed = state === 'completed', savedPath = completed ? item.getSavePath() : '';
+      const buttons = completed ? ['Fermer', 'Afficher dans le dossier'] : ['Fermer'];
+      if (completed && openableDocument(savedPath)) buttons.push('Ouvrir');
       dialog.showMessageBox(window, {
         type: completed ? 'info' : 'error', title: TITLE,
         message: completed ? 'Téléchargement terminé' : 'Téléchargement interrompu',
         detail: completed ? path.basename(savedPath) : 'Vérifiez votre connexion et l’espace disque, puis réessayez depuis WhatsApp.',
-        buttons: completed ? ['Fermer', 'Afficher dans le dossier'] : ['Fermer'],
+        buttons,
         defaultId: 0, cancelId: 0, noLink: true,
-      }).then(({ response }) => {
+      }).then(async ({ response }) => {
         if (completed && response === 1) shell.showItemInFolder(savedPath);
+        if (completed && buttons[response] === 'Ouvrir') {
+          try {
+            if (!openableDocument(savedPath) || await shell.openPath(savedPath)) throw new Error('Open failed');
+          } catch { await openFailure('Impossible d’ouvrir cette pièce jointe'); }
+        }
       }).catch(() => {});
     });
   });
   window = new BrowserWindow({
     title: TITLE, width: 1280, height: 820, minWidth: 800, minHeight: 600,
-    show: true, autoHideMenuBar: true,
+    show: true, autoHideMenuBar: false,
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#111b21' : '#f7f5f3',
     webPreferences: WEB_PREFERENCES,
   });
   const mediaGrants = new Set();
+  const permissionFile = path.join(profile, 'media-permissions.json');
+  let mediaSetupDone = false;
+  try {
+    const fd = fs.openSync(permissionFile, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    try {
+      const stat = fs.fstatSync(fd);
+      if (!stat.isFile() || (stat.mode & 0o077) || stat.size > 512) throw new Error('Unsafe permissions file');
+      const saved = JSON.parse(fs.readFileSync(fd, 'utf8'));
+      if (saved.origin !== new URL(HOME).origin || !Array.isArray(saved.grants)
+        || !saved.grants.every(type => ['audio', 'video', 'speaker'].includes(type))) throw new Error('Invalid permissions');
+      saved.grants.forEach(type => mediaGrants.add(type));
+      mediaSetupDone = true;
+    } finally { fs.closeSync(fd); }
+  } catch { /* Missing or invalid consent never grants access. */ }
+  const saveMediaGrants = grants => {
+    const temporary = `${permissionFile}.${require('node:crypto').randomUUID()}.tmp`;
+    try {
+      fs.writeFileSync(temporary, JSON.stringify({ origin: new URL(HOME).origin, grants: [...grants] }), { flag: 'wx', mode: 0o600 });
+      fs.renameSync(temporary, permissionFile);
+      mediaSetupDone = true;
+    } finally { fs.rmSync(temporary, { force: true }); }
+  };
   let permissionGeneration = 0, permissionQueue = Promise.resolve();
   const mediaContext = (contents, details) => contents === window.webContents
     && !window.isDestroyed() && !contents.isDestroyed()
     && details?.isMainFrame === true && trustedURL(details.requestingUrl)
+    && (!details.securityOrigin || trustedURL(details.securityOrigin))
     && trustedURL(contents.getURL());
   browserSession.setPermissionCheckHandler((contents, permission, origin, details) => {
     if (!mediaContext(contents, details) || !trustedURL(origin)
@@ -131,7 +183,7 @@ async function boot() {
     const generation = permissionGeneration, url = contents.getURL();
     const current = () => generation === permissionGeneration
       && mediaContext(contents, details) && contents.getURL() === url;
-    // Serialize prompts; grants last only for this process and never cover other origins.
+    // Serialize consent prompts and never extend a grant to another origin.
     permissionQueue = permissionQueue.then(async () => {
       let allowed = false;
       try {
@@ -143,14 +195,20 @@ async function boot() {
             const { response } = await dialog.showMessageBox(window, {
               type: 'question', title: TITLE,
               message: `Autoriser https://web.whatsapp.com à utiliser : ${missing.map(type => labels[type]).join(', ')} ?`,
-              detail: 'Valable jusqu’à la fermeture de l’application. Le menu Application permet de révoquer ces autorisations et de recharger la page.',
-              buttons: ['Refuser', 'Autoriser'], defaultId: 0, cancelId: 0, noLink: true,
+              detail: 'Votre choix est mémorisé sur cet ordinateur. Le menu Application permet de modifier ou révoquer ces autorisations. Aucune capture ne démarre avec ce dialogue.',
+              buttons: ['Refuser', 'Autoriser et mémoriser'], defaultId: 0, cancelId: 0, noLink: true,
             });
             allowed = response === 1 && current();
-            if (allowed) missing.forEach(type => mediaGrants.add(type));
+            if (current()) {
+              saveMediaGrants(allowed ? new Set([...mediaGrants, ...missing]) : mediaGrants);
+              if (allowed) missing.forEach(type => mediaGrants.add(type));
+            }
           }
         }
-      } catch { allowed = false; }
+      } catch {
+        allowed = false;
+        await openFailure('Impossible de mémoriser les autorisations', 'L’accès demandé reste refusé. Vérifiez les droits et l’espace disque du dossier de session.');
+      }
       callback(allowed);
     }).catch(() => {});
   };
@@ -163,14 +221,40 @@ async function boot() {
       if (allowed) window.webContents.reload();
     }, { isMainFrame: true, requestingUrl: window.webContents.getURL(), mediaTypes });
   };
+  window.webContents.on('did-finish-load', () => {
+    if (!mediaSetupDone && trustedURL(window.webContents.getURL())) requestMedia(['audio', 'video']);
+  });
   window.webContents.on('did-start-navigation', details => {
-    if (details.isMainFrame && !details.isSameDocument) permissionGeneration++;
+    if (details.isMainFrame && !details.isSameDocument) { permissionGeneration++; pendingBlobDownload = undefined; }
   });
   window.on('page-title-updated', event => { event.preventDefault(); window.setTitle(TITLE); });
-  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  window.webContents.on('will-navigate', event => { if (!trustedURL(event.url)) event.preventDefault(); });
+  const openLink = value => {
+    if (window.isDestroyed() || !trustedURL(window.webContents.getURL())) return;
+    let url;
+    try { url = new URL(value); } catch { return; }
+    if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) return;
+    shell.openExternal(url.href).catch(() => openFailure('Impossible d’ouvrir le lien dans votre navigateur'));
+  };
+  const downloadBlob = value => {
+    if (window.isDestroyed() || !trustedURL(window.webContents.getURL()) || pendingBlobDownload) return;
+    let url;
+    try { url = new URL(value); } catch { return; }
+    if (url.protocol !== 'blob:' || !trustedURL(url.origin)) return;
+    pendingBlobDownload = url.href;
+    try { window.webContents.downloadURL(url.href); }
+    catch { pendingBlobDownload = undefined; openFailure('Impossible de télécharger la pièce jointe'); }
+  };
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    downloadBlob(url); openLink(url);
+    return { action: 'deny' };
+  });
   window.webContents.on('will-frame-navigate', event => {
-    if (event.isMainFrame && !trustedURL(event.url)) event.preventDefault();
+    if (event.isMainFrame && !trustedURL(event.url)) {
+      event.preventDefault();
+      if (event.initiator === window.webContents.mainFrame && trustedURL(event.initiator.url)) {
+        downloadBlob(event.url); openLink(event.url);
+      }
+    }
   });
   window.webContents.on('will-redirect', event => {
     if (event.isMainFrame && !trustedURL(event.url)) event.preventDefault();
@@ -183,7 +267,15 @@ async function boot() {
       { label: 'Autoriser le microphone…', accelerator: 'CommandOrControl+Shift+M', click: () => requestMedia(['audio']) },
       { label: 'Autoriser le microphone et la caméra…', accelerator: 'CommandOrControl+Shift+V', click: () => requestMedia(['audio', 'video']) },
       { label: 'Révoquer les autorisations audio/vidéo et recharger', click: () => {
-        mediaGrants.clear(); permissionGeneration++; window.webContents.reload();
+        mediaGrants.clear(); permissionGeneration++;
+        try { saveMediaGrants(mediaGrants); }
+        catch {
+          try { fs.unlinkSync(permissionFile); mediaSetupDone = true; }
+          catch {
+            openFailure('Révocation limitée à cette session', 'Les anciennes autorisations restent sur disque et peuvent revenir au prochain lancement. Vérifiez les droits du dossier de session, puis réessayez la révocation.');
+          }
+        }
+        window.webContents.reload();
       } },
       { type: 'separator' },
       { label: 'Quitter', accelerator: 'CommandOrControl+Q', click: () => app.quit() },

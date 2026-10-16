@@ -8,18 +8,21 @@ const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
 const { trustedURL, chromiumUserAgent, WEB_PREFERENCES } = require('../runtime/main.cjs');
 
-async function runtimeHarness(t, respond = async () => ({ response: 1 })) {
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsapp-permissions-'));
-  t.after(() => fs.rmSync(profile, { recursive: true, force: true }));
-  const handlers = {}, prompts = [], menus = [], failures = [], revealed = [];
+async function runtimeHarness(t, respond = async () => ({ response: 1 }), options = {}) {
+  const profile = options.profile || fs.mkdtempSync(path.join(os.tmpdir(), 'whatsapp-permissions-'));
+  if (!options.profile) t.after(() => fs.rmSync(profile, { recursive: true, force: true }));
+  const handlers = {}, prompts = [], menus = [], failures = [], revealed = [], links = [], opened = [], downloadURLs = [];
   let window;
   class Window extends EventEmitter {
-    constructor() {
+    constructor(options) {
       super(); window = this;
+      this.options = options;
+      const mainFrame = { url: 'https://web.whatsapp.com/' };
       this.webContents = Object.assign(new EventEmitter(), {
-        url: '', destroyed: false, reloads: 0,
+        url: '', destroyed: false, reloads: 0, mainFrame,
         getURL() { return this.url; }, isDestroyed() { return this.destroyed; },
-        setWindowOpenHandler() {}, reload() { this.reloads++; },
+        setWindowOpenHandler(fn) { handlers.popup = fn; }, reload() { this.reloads++; },
+        downloadURL(url) { downloadURLs.push(url); },
       });
     }
     isDestroyed() { return this.webContents.destroyed; }
@@ -43,7 +46,11 @@ async function runtimeHarness(t, respond = async () => ({ response: 1 })) {
     }) },
     Menu: { buildFromTemplate: value => value, setApplicationMenu: value => menus.push(value) },
     dialog: { async showMessageBox(parent, options) { assert.equal(parent, window); prompts.push(options); return respond(options); } },
-    shell: { showItemInFolder: file => revealed.push(file) },
+    shell: {
+      showItemInFolder: file => revealed.push(file),
+      async openExternal(url) { links.push(url); if (options.openError) throw new Error('No browser'); },
+      async openPath(file) { opened.push(file); return options.openError ? 'No application' : ''; },
+    },
     nativeTheme: { shouldUseDarkColors: false },
   };
   const stdin = Object.assign(new EventEmitter(), { setEncoding() {} });
@@ -57,10 +64,17 @@ async function runtimeHarness(t, respond = async () => ({ response: 1 })) {
   });
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(failures, [], 'Runtime failed to start in the permission fixture');
-  return { handlers, prompts, menus, window, stdin, revealed,
+  return { handlers, prompts, menus, window, stdin, revealed, links, opened, profile, downloadURLs,
+    navigate(url, extra = {}, name = 'will-frame-navigate') {
+      const event = { url, isMainFrame: true, initiator: window.webContents.mainFrame,
+        prevented: false, preventDefault() { this.prevented = true; }, ...extra };
+      window.webContents.emit(name, event);
+      return event;
+    },
     download(options = {}, contents = window.webContents) {
       const item = Object.assign(new EventEmitter(), {
         getInitiatorOrigin: () => 'https://web.whatsapp.com',
+        getURL: () => 'https://web.whatsapp.com/file', getMimeType: () => 'application/pdf',
         getFilename: () => 'attachment.pdf', getSavePath: () => path.join(profile, 'chosen.pdf'),
         setSaveDialogOptions(options) { this.saveOptions = options; }, ...options,
       });
@@ -262,4 +276,141 @@ test('navigation or revocation invalidates an outstanding consent dialog', async
     assert.equal(await request, false);
     assert.equal(app.check('media', { mediaType: 'audio' }), false);
   }
+});
+
+test('external links open once in the default browser while the app stays on WhatsApp', async t => {
+  const app = await runtimeHarness(t);
+  const url = 'https://example.org/document?q=hello#page';
+  assert.equal(app.handlers.popup({ url }).action, 'deny');
+  assert.equal(app.navigate('http://example.org/').prevented, true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(app.links, [url, 'http://example.org/']);
+  assert.equal(app.window.webContents.getURL(), 'https://web.whatsapp.com/');
+  assert.equal(app.navigate('https://web.whatsapp.com/').prevented, false);
+});
+
+test('dangerous schemes, subframe navigations and redirects never launch native handlers', async t => {
+  const app = await runtimeHarness(t);
+  for (const url of ['file:///tmp/test.desktop', 'javascript:alert(1)', 'data:text/html,hi',
+    'ms-excel:test', 'mailto:test@example.org', 'https://user:secret@example.org/', 'not a URL']) {
+    assert.equal(app.handlers.popup({ url }).action, 'deny');
+    assert.equal(app.navigate(url).prevented, true);
+  }
+  app.navigate('https://example.org/', { initiator: { url: 'https://evil.test/' } });
+  app.navigate('https://example.org/', {}, 'will-redirect');
+  app.window.webContents.url = 'https://evil.test/';
+  app.handlers.popup({ url: 'https://example.org/' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(app.links, []);
+});
+
+test('completed documents open only on an explicit click; executables stay closed', async t => {
+  const app = await runtimeHarness(t, async options => ({ response: options.buttons.indexOf('Ouvrir') }));
+  const file = path.join(app.profile, 'saved.pdf');
+  fs.writeFileSync(file, 'test PDF', { mode: 0o600 });
+  app.download({ getSavePath: () => file }).item.emit('done', {}, 'completed');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(app.opened, [file]);
+  const executable = path.join(app.profile, 'run.desktop');
+  fs.writeFileSync(executable, '[Desktop Entry]', { mode: 0o600 });
+  app.download({ getSavePath: () => executable }).item.emit('done', {}, 'completed');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(app.opened, [file]);
+  const alias = path.join(app.profile, 'alias.pdf');
+  fs.symlinkSync(file, alias);
+  for (const unsafe of [alias, path.join(app.profile, 'missing.pdf'), app.profile]) {
+    app.download({ getSavePath: () => unsafe }).item.emit('done', {}, 'completed');
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  fs.chmodSync(file, 0o700);
+  app.download({ getSavePath: () => file }).item.emit('done', {}, 'completed');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(app.opened, [file]);
+});
+
+test('native opener failures produce a useful error instead of disappearing', async t => {
+  const app = await runtimeHarness(t, async options => ({ response: options.buttons.indexOf('Ouvrir') }), { openError: true });
+  const file = path.join(app.profile, 'saved.pdf');
+  fs.writeFileSync(file, 'test', { mode: 0o600 });
+  app.download({ getSavePath: () => file }).item.emit('done', {}, 'completed');
+  app.handlers.popup({ url: 'https://example.org/' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.prompts.filter(prompt => prompt.type === 'error').length, 2);
+});
+
+test('first-run media setup is discoverable and explicit grants survive restarts', async t => {
+  const app = await runtimeHarness(t);
+  app.window.webContents.emit('did-finish-load');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.prompts.length, 1, 'Show native consent even when WhatsApp never requests it');
+  assert.equal(app.check('media', { mediaType: 'audio' }), true);
+  assert.equal(app.check('media', { mediaType: 'video' }), true);
+  const restarted = await runtimeHarness(t, undefined, { profile: app.profile });
+  restarted.window.webContents.emit('did-finish-load');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(restarted.check('media', { mediaType: 'audio' }), true);
+  assert.equal(restarted.prompts.length, 0);
+  assert.equal(fs.statSync(path.join(app.profile, 'media-permissions.json')).mode & 0o777, 0o600);
+  restarted.menus[0][0].submenu.find(item => item.label?.startsWith('Révoquer')).click();
+  const revoked = await runtimeHarness(t, undefined, { profile: app.profile });
+  assert.equal(revoked.check('media', { mediaType: 'audio' }), false);
+});
+
+test('declined setup does not nag again, unsafe stored grants and spoofed security origins fail closed', async t => {
+  const app = await runtimeHarness(t, async () => ({ response: 0 }));
+  app.window.webContents.emit('did-finish-load');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.prompts.length, 1);
+  const restarted = await runtimeHarness(t, undefined, { profile: app.profile });
+  restarted.window.webContents.emit('did-finish-load');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(restarted.prompts.length, 0);
+  assert.equal(restarted.check('media', { mediaType: 'audio' }), false);
+  assert.equal(await restarted.request('media', { mediaTypes: ['audio'], securityOrigin: 'https://evil.test' }), false);
+  const saved = path.join(app.profile, 'media-permissions.json');
+  for (const content of ['invalid JSON', JSON.stringify({ origin: 'https://evil.test', grants: ['audio'] }),
+    JSON.stringify({ origin: 'https://web.whatsapp.com', grants: ['audio', 'usb'] })]) {
+    fs.writeFileSync(saved, content, { mode: 0o600 });
+    const invalid = await runtimeHarness(t, undefined, { profile: app.profile });
+    assert.equal(invalid.check('media', { mediaType: 'audio' }), false);
+  }
+});
+
+test('official blob document popups reach Save with one scoped download authorization', async t => {
+  const app = await runtimeHarness(t);
+  const url = 'blob:https://web.whatsapp.com/01234567-89ab-cdef-0123-456789abcdef';
+  assert.equal(app.handlers.popup({ url }).action, 'deny');
+  assert.deepEqual(app.downloadURLs, [url]);
+  const blob = { getURL: () => url, getInitiatorOrigin: () => '', getFilename: () => '01234567-89ab-cdef-0123-456789abcdef' };
+  assert.equal(app.download({ ...blob, getURL: () => url + '-other' }).event.prevented, true);
+  assert.equal(app.download(blob, null).event.prevented, true);
+  const accepted = app.download(blob);
+  assert.equal(accepted.event.prevented, false);
+  assert.match(accepted.item.saveOptions.defaultPath, /\.pdf$/);
+  assert.equal(app.download(blob).event.prevented, true, 'An empty initiator exception must be one-shot');
+  app.handlers.popup({ url });
+  app.window.webContents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
+  assert.equal(app.download(blob).event.prevented, true, 'Navigation invalidates authorization');
+  app.handlers.popup({ url });
+  assert.equal(app.download({ ...blob, getInitiatorOrigin: () => 'https://evil.test' }).event.prevented, true);
+  assert.equal(app.download({ ...blob, getInitiatorOrigin: () => 'https://web.whatsapp.com' }).event.prevented, false);
+  assert.equal(app.download(blob).event.prevented, true);
+  for (const other of ['blob:https://evil.test/id', 'blob:null/id', 'blob:http://web.whatsapp.com/id']) app.handlers.popup({ url: other });
+  assert.equal(app.downloadURLs.length, 3);
+});
+
+test('failed revocation reports remaining disk grants and a successful retry clears them', async t => {
+  const app = await runtimeHarness(t);
+  assert.equal(await app.request('media', { mediaTypes: ['audio'] }), true);
+  const saved = path.join(app.profile, 'media-permissions.json');
+  fs.chmodSync(app.profile, 0o500);
+  try {
+    app.menus[0][0].submenu.find(item => item.label?.startsWith('Révoquer')).click();
+    assert.equal(app.check('media', { mediaType: 'audio' }), false);
+    assert.ok(app.prompts.some(prompt => prompt.message === 'Révocation limitée à cette session'));
+  } finally { fs.chmodSync(app.profile, 0o700); }
+  app.menus[0][0].submenu.find(item => item.label?.startsWith('Révoquer')).click();
+  assert.deepEqual(JSON.parse(fs.readFileSync(saved, 'utf8')).grants, []);
+  const restarted = await runtimeHarness(t, undefined, { profile: app.profile });
+  assert.equal(restarted.check('media', { mediaType: 'audio' }), false);
 });
