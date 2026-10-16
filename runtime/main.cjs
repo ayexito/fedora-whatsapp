@@ -42,7 +42,8 @@ async function boot() {
   app.setPath('sessionData', profile);
   app.setDesktopName(`${process.env.WA_DESKTOP_ID}.desktop`);
   app.enableSandbox();
-  let window, contents, requestMedia;
+  let window, contents, requestMedia, quitting = false;
+  app.on('before-quit', () => { quitting = true; });
   if (!app.requestSingleInstanceLock()) { app.quit(); return; }
   const focus = () => {
     if (window && !window.isDestroyed()) {
@@ -139,6 +140,9 @@ async function boot() {
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#111b21' : '#f7f5f3',
     webPreferences: { ...WEB_PREFERENCES, preload: __filename },
   });
+  window.on('close', event => {
+    if (!quitting) { event.preventDefault(); window.hide(); }
+  });
   // A local title bar keeps its controls and preload separate from the remote client.
   const titlebarURL = 'data:text/html;charset=utf-8,' + encodeURIComponent(`<!doctype html>
     <html lang="fr"><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
@@ -167,10 +171,12 @@ async function boot() {
   contents = client.webContents;
   window.contentView.addChildView(client);
   const resizeClient = () => {
-    const [width, height] = window.getContentSize();
+    const { width, height } = window.contentView.getBounds();
     client.setBounds({ x: 0, y: 40, width, height: Math.max(0, height - 40) });
   };
-  resizeClient(); window.on('resize', resizeClient);
+  // Wayland can lay out the native view after the window's resize event.
+  window.contentView.on('bounds-changed', resizeClient);
+  resizeClient();
   window.on('focus', () => contents.focus());
   window.on('closed', () => { if (!contents.isDestroyed()) contents.close(); });
   window.loadURL(titlebarURL).catch(() => app.quit());

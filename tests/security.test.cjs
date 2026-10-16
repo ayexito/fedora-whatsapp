@@ -26,8 +26,10 @@ async function runtimeHarness(t, respond = async () => ({ response: 1 }), option
       super(); window = this;
       this.options = options;
       this.webContents = makeContents();
-      this.contentView = { addChildView() {} };
-      this.size = [1280, 820]; this.maximized = false; this.minimized = false; this.closed = false;
+      this.contentView = Object.assign(new EventEmitter(), {
+        addChildView() {}, getBounds: () => ({ x: 0, y: 0, width: this.size[0], height: this.size[1] }),
+      });
+      this.size = [1280, 820]; this.maximized = false; this.minimized = false; this.closed = false; this.visible = true;
     }
     isDestroyed() { return this.closed; }
     isMinimized() { return this.minimized; }
@@ -37,8 +39,13 @@ async function runtimeHarness(t, respond = async () => ({ response: 1 }), option
     restore() { this.minimized = false; }
     maximize() { this.maximized = true; }
     unmaximize() { this.maximized = false; }
-    close() { this.closed = true; this.emit('closed'); }
-    show() {}
+    close() {
+      const event = { prevented: false, preventDefault() { this.prevented = true; } };
+      this.emit('close', event);
+      if (!event.prevented) { this.closed = true; this.emit('closed'); }
+    }
+    hide() { this.visible = false; }
+    show() { this.visible = true; }
     focus() {}
     async loadURL(url) { return this.webContents.loadURL(url); }
   }
@@ -55,6 +62,7 @@ async function runtimeHarness(t, respond = async () => ({ response: 1 }), option
       setName() {}, setPath() {}, setDesktopName() {}, enableSandbox() {},
       getPath: () => path.join(profile, 'downloads'),
       requestSingleInstanceLock: () => true, whenReady: async () => {},
+      quit() { this.emit('before-quit'); window?.close(); },
     }),
     BrowserWindow: Window, WebContentsView: Client, ipcMain: new EventEmitter(),
     session: { defaultSession: Object.assign(new EventEmitter(), {
@@ -82,7 +90,7 @@ async function runtimeHarness(t, respond = async () => ({ response: 1 }), option
   });
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(failures, [], 'Runtime failed to start in the permission fixture');
-  return { handlers, prompts, menus, window, view, contents: view.webContents, ipc: electron.ipcMain,
+  return { handlers, prompts, menus, window, view, contents: view.webContents, ipc: electron.ipcMain, app: electron.app,
     stdin, revealed, links, opened, profile, downloadURLs,
     navigate(url, extra = {}, name = 'will-frame-navigate') {
       const event = { url, isMainFrame: true, initiator: view.webContents.mainFrame,
@@ -188,11 +196,39 @@ test('window controls accept commands only from the local title bar main frame',
   assert.equal(app.window.maximized, true);
   app.ipc.emit('window-control', trusted, 'maximize');
   assert.equal(app.window.maximized, false);
-  app.window.size = [900, 650]; app.window.emit('resize');
-  assert.deepEqual(JSON.parse(JSON.stringify(app.view.bounds)), { x: 0, y: 40, width: 900, height: 610 });
   app.ipc.emit('window-control', trusted, 'close');
-  assert.equal(app.window.closed, true);
-  assert.equal(app.contents.destroyed, true);
+  assert.equal(app.window.visible, false);
+  assert.equal(app.window.closed, false);
+  assert.equal(app.contents.destroyed, false);
+});
+
+test('Close keeps the session alive, reopening restores it, and explicit Quit exits', async t => {
+  for (const quit of ['menu', 'pipe', 'stdin-end']) {
+    const app = await runtimeHarness(t);
+    app.window.close();
+    assert.equal(app.window.visible, false);
+    assert.equal(app.window.closed, false);
+    assert.equal(app.contents.destroyed, false);
+    app.stdin.emit('data', 'focus\n');
+    assert.equal(app.window.visible, true);
+    app.window.close();
+    app.app.emit('second-instance');
+    assert.equal(app.window.visible, true);
+    if (quit === 'menu') app.menus[0][0].submenu.find(item => item.label === 'Quitter').click();
+    else if (quit === 'pipe') app.stdin.emit('data', 'quit\n');
+    else app.stdin.emit('end');
+    assert.equal(app.window.closed, true);
+    assert.equal(app.contents.destroyed, true);
+  }
+});
+
+test('the chat follows native content bounds after a compositor maximize or restore', async t => {
+  const app = await runtimeHarness(t);
+  for (const size of [[1920, 1035], [459, 496], [1000, 760]]) {
+    app.window.size = size;
+    app.window.contentView.emit('bounds-changed');
+    assert.deepEqual(JSON.parse(JSON.stringify(app.view.bounds)), { x: 0, y: 40, width: size[0], height: size[1] - 40 });
+  }
 });
 
 test('local title bar preload binds accessible buttons without exposing a renderer API', () => {
