@@ -16,11 +16,11 @@ Only Fedora 44 x86_64 has been tested so far. Each port needs to be built and ch
 
 ## Where it's at
 
-Version 0.1.1 is an early build. You need to build it from source for now.
+Version 0.1.2 is an early build. You need to build it from source for now.
 
 I've checked startup, the official login screen, saved sessions, opening the app from the launcher, reusing one window, and the renderer sandbox on Fedora 44 x86_64 with Hyprland Wayland. I also reopened a linked account across restarts and tested navigation and scrolling.
 
-The app has a visible Application menu, reload/quit shortcuts, a native About dialog, attachment downloads with a Save dialog, and remembered permission choices for the microphone, camera and speaker selection. Web links open in your default browser. Supported saved documents and media can be opened with a separate click after downloading. Closing the window quits it. Notifications, preferences and tray/background mode still need work.
+The app has close, minimize and maximize/restore buttons, a visible Application menu, reload/quit shortcuts, a native About dialog, attachment downloads with a Save dialog, and remembered permissions for media and desktop notifications. Web links open in your default browser. Supported saved documents and media can be opened with a separate click after downloading. Closing the window quits it; minimizing keeps it running. Preferences and tray/background mode still need work.
 
 Sending and receiving messages, voice/video calls, GNOME Wayland, X11 and long-running use still need testing. There is no RPM or Flatpak package yet.
 
@@ -99,6 +99,10 @@ These tests check private storage permissions, trusted URLs, renderer isolation,
 To save an attachment, click its download button in WhatsApp, choose a folder and filename, then click **Enregistrer** (Save). Document links that open a WhatsApp blob popup also use this Save dialog. Existing files require overwrite confirmation. The completion dialog offers **Afficher dans le dossier** (Show in folder) and, for supported documents and media, **Ouvrir** (Open) in the default application. Files never open automatically. Cancelling the Save dialog cancels that download. If a download is interrupted, retry it from WhatsApp. Keep the app open until the download finishes.
 
 An isolated Chromium profile was used to check synthetic HTTPS/blob downloads, blob document popups, cancellation, an unwritable destination and the explicit Open action. External links from the main page and popups were each dispatched once to a browser-opening test spy. Synthetic audio/video capture produced recording bytes; permission queries stayed granted after restarting without another prompt and became denied after revocation. These checks used synthetic media and intercepted desktop-opening calls; hardware capture, actual calls and default-application dispatch still need testing.
+
+The local title bar supplies all three window buttons even when the desktop only shows Close. Its controls are separate from the WhatsApp page. Minimize, maximize/restore, close and restoring through the app's focus command were checked on Hyprland Wayland. The compositor still controls window placement and whether a window floats or tiles.
+
+To enable desktop notifications, choose **Application → Autoriser les notifications…**, then **Autoriser et mémoriser**. This reloads WhatsApp; enable notifications in WhatsApp's own settings too if requested. You can turn them off with **Application → Désactiver les notifications et recharger**. Notifications use the official web client's browser API and the desktop notification service; the app does not create a second copy. Use WhatsApp's notification settings for previews and your desktop settings for Do Not Disturb. Notifications require the app to remain running; minimize it rather than closing it. A synthetic web notification reached the desktop service, and consent persisted across restart. Incoming-message delivery, notification clicks and GNOME Do Not Disturb still need a manual check.
 
 HTTP and HTTPS links open in your default browser; custom links such as `file:` or application-specific schemes remain blocked.
 

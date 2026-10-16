@@ -23,7 +23,7 @@ const WEB_PREFERENCES = Object.freeze({
 });
 
 async function boot() {
-  const { app, BrowserWindow, Menu, dialog, session, nativeTheme, shell } = require('electron');
+  const { app, BrowserWindow, WebContentsView, Menu, dialog, session, nativeTheme, shell, ipcMain } = require('electron');
   const fs = require('node:fs');
   const path = require('node:path');
   if (['no-sandbox', 'disable-web-security', 'ignore-certificate-errors', 'allow-insecure-localhost']
@@ -42,12 +42,12 @@ async function boot() {
   app.setPath('sessionData', profile);
   app.setDesktopName(`${process.env.WA_DESKTOP_ID}.desktop`);
   app.enableSandbox();
-  let window, requestMedia;
+  let window, contents, requestMedia;
   if (!app.requestSingleInstanceLock()) { app.quit(); return; }
   const focus = () => {
     if (window && !window.isDestroyed()) {
       if (window.isMinimized()) window.restore();
-      window.show(); window.focus();
+      window.show(); window.focus(); contents?.focus();
     }
   };
   app.on('second-instance', focus);
@@ -68,7 +68,7 @@ async function boot() {
       commands = commands.slice(newline + 1);
       if (command === 'quit') app.quit();
       else if (command === 'focus') focus();
-      else if (command === 'reload' && window && !window.isDestroyed()) window.webContents.reload();
+      else if (command === 'reload' && window && !window.isDestroyed()) contents.reload();
       else if (command === 'media') requestMedia?.(['audio', 'video']);
     }
   });
@@ -92,9 +92,9 @@ async function boot() {
         && /\.(pdf|docx?|xlsx?|pptx?|od[stpg]|rtf|txt|csv|png|jpe?g|webp|gif|mp[34]|m4[av]|ogg|opus|wav|webm|mov)$/i.test(file);
     } catch { return false; }
   };
-  browserSession.on('will-download', (event, item, contents) => {
+  browserSession.on('will-download', (event, item, sourceContents) => {
     // The initiator identifies the page; attachment URLs may be blobs or CDN links.
-    if (!window || window.isDestroyed() || contents !== window.webContents
+    if (!window || window.isDestroyed() || sourceContents !== contents || contents.isDestroyed()
       || !trustedURL(contents.getURL())) {
       event.preventDefault(); return;
     }
@@ -135,10 +135,45 @@ async function boot() {
   });
   window = new BrowserWindow({
     title: TITLE, width: 1280, height: 820, minWidth: 800, minHeight: 600,
-    show: true, autoHideMenuBar: false,
+    show: true, frame: false, autoHideMenuBar: false,
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#111b21' : '#f7f5f3',
-    webPreferences: WEB_PREFERENCES,
+    webPreferences: { ...WEB_PREFERENCES, preload: __filename },
   });
+  // A local title bar keeps its controls and preload separate from the remote client.
+  const titlebarURL = 'data:text/html;charset=utf-8,' + encodeURIComponent(`<!doctype html>
+    <html lang="fr"><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+    <title>${TITLE}</title><style>
+    :root{color-scheme:light dark}*{box-sizing:border-box}body{margin:0;background:light-dark(#f7f5f3,#111b21);color:light-dark(#202c33,#e9edef);font:13px system-ui}
+    header{height:40px;display:flex;align-items:center;app-region:drag;user-select:none}
+    span{flex:1;min-width:0;padding:0 14px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+    button{app-region:no-drag;width:46px;height:40px;border:0;background:transparent;color:inherit;font:20px system-ui;cursor:default}
+    button:hover{background:light-dark(#dedddb,#2a3942)}button:focus-visible{outline:2px solid #25d366;outline-offset:-3px}
+    #close:hover{background:#c42b1c;color:white}</style>
+    <header aria-label="Barre de titre"><span>Fedora WhatsApp</span>
+    <button id="minimize" aria-label="Réduire" title="Réduire">−</button>
+    <button id="maximize" aria-label="Agrandir ou restaurer" title="Agrandir ou restaurer">□</button>
+    <button id="close" aria-label="Fermer" title="Fermer">×</button></header></html>`);
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  window.webContents.on('will-navigate', event => event.preventDefault());
+  ipcMain.on('window-control', (event, action) => {
+    if (window.isDestroyed() || event.sender !== window.webContents
+      || event.senderFrame !== window.webContents.mainFrame || event.senderFrame.url !== titlebarURL) return;
+    if (action === 'minimize') window.minimize();
+    else if (action === 'maximize') {
+      if (window.isMaximized()) window.unmaximize(); else window.maximize();
+    } else if (action === 'close') window.close();
+  });
+  const client = new WebContentsView({ webPreferences: WEB_PREFERENCES });
+  contents = client.webContents;
+  window.contentView.addChildView(client);
+  const resizeClient = () => {
+    const [width, height] = window.getContentSize();
+    client.setBounds({ x: 0, y: 40, width, height: Math.max(0, height - 40) });
+  };
+  resizeClient(); window.on('resize', resizeClient);
+  window.on('focus', () => contents.focus());
+  window.on('closed', () => { if (!contents.isDestroyed()) contents.close(); });
+  window.loadURL(titlebarURL).catch(() => app.quit());
   const mediaGrants = new Set();
   const permissionFile = path.join(profile, 'media-permissions.json');
   let mediaSetupDone = false;
@@ -149,7 +184,7 @@ async function boot() {
       if (!stat.isFile() || (stat.mode & 0o077) || stat.size > 512) throw new Error('Unsafe permissions file');
       const saved = JSON.parse(fs.readFileSync(fd, 'utf8'));
       if (saved.origin !== new URL(HOME).origin || !Array.isArray(saved.grants)
-        || !saved.grants.every(type => ['audio', 'video', 'speaker'].includes(type))) throw new Error('Invalid permissions');
+        || !saved.grants.every(type => ['audio', 'video', 'speaker', 'notifications'].includes(type))) throw new Error('Invalid permissions');
       saved.grants.forEach(type => mediaGrants.add(type));
       mediaSetupDone = true;
     } finally { fs.closeSync(fd); }
@@ -163,26 +198,27 @@ async function boot() {
     } finally { fs.rmSync(temporary, { force: true }); }
   };
   let permissionGeneration = 0, permissionQueue = Promise.resolve();
-  const mediaContext = (contents, details) => contents === window.webContents
-    && !window.isDestroyed() && !contents.isDestroyed()
+  const mediaContext = (sourceContents, details) => sourceContents === contents
+    && !window.isDestroyed() && !sourceContents.isDestroyed()
     && details?.isMainFrame === true && trustedURL(details.requestingUrl)
     && (!details.securityOrigin || trustedURL(details.securityOrigin))
-    && trustedURL(contents.getURL());
-  browserSession.setPermissionCheckHandler((contents, permission, origin, details) => {
-    if (!mediaContext(contents, details) || !trustedURL(origin)
+    && trustedURL(sourceContents.getURL());
+  browserSession.setPermissionCheckHandler((sourceContents, permission, origin, details) => {
+    if (!mediaContext(sourceContents, details) || !trustedURL(origin)
       || (details.securityOrigin && !trustedURL(details.securityOrigin))) return false;
     if (permission === 'speaker-selection') return mediaGrants.has('speaker');
+    if (permission === 'notifications') return mediaGrants.has('notifications');
     return permission === 'media' && ['audio', 'video'].includes(details.mediaType)
       && mediaGrants.has(details.mediaType);
   });
-  const requestPermission = (contents, permission, callback, details) => {
-    const types = permission === 'speaker-selection' ? ['speaker']
+  const requestPermission = (sourceContents, permission, callback, details) => {
+    const types = permission === 'notifications' ? ['notifications'] : permission === 'speaker-selection' ? ['speaker']
       : permission === 'media' && Array.isArray(details?.mediaTypes)
         && details.mediaTypes.every(type => ['audio', 'video'].includes(type)) ? [...new Set(details.mediaTypes)] : [];
-    if (!types.length || !mediaContext(contents, details)) { callback(false); return; }
-    const generation = permissionGeneration, url = contents.getURL();
+    if (!types.length || !mediaContext(sourceContents, details)) { callback(false); return; }
+    const generation = permissionGeneration, url = sourceContents.getURL();
     const current = () => generation === permissionGeneration
-      && mediaContext(contents, details) && contents.getURL() === url;
+      && mediaContext(sourceContents, details) && sourceContents.getURL() === url;
     // Serialize consent prompts and never extend a grant to another origin.
     permissionQueue = permissionQueue.then(async () => {
       let allowed = false;
@@ -191,7 +227,7 @@ async function boot() {
           const missing = types.filter(type => !mediaGrants.has(type));
           if (!missing.length) allowed = true;
           else {
-            const labels = { audio: 'microphone', video: 'caméra', speaker: 'choix des haut-parleurs' };
+            const labels = { audio: 'microphone', video: 'caméra', speaker: 'choix des haut-parleurs', notifications: 'notifications du bureau' };
             const { response } = await dialog.showMessageBox(window, {
               type: 'question', title: TITLE,
               message: `Autoriser https://web.whatsapp.com à utiliser : ${missing.map(type => labels[type]).join(', ')} ?`,
@@ -217,57 +253,68 @@ async function boot() {
   requestMedia = mediaTypes => {
     if (window.isDestroyed()) return;
     focus();
-    requestPermission(window.webContents, 'media', allowed => {
-      if (allowed) window.webContents.reload();
-    }, { isMainFrame: true, requestingUrl: window.webContents.getURL(), mediaTypes });
+    requestPermission(contents, 'media', allowed => {
+      if (allowed) contents.reload();
+    }, { isMainFrame: true, requestingUrl: contents.getURL(), mediaTypes });
   };
-  window.webContents.on('did-finish-load', () => {
-    if (!mediaSetupDone && trustedURL(window.webContents.getURL())) requestMedia(['audio', 'video']);
+  contents.on('did-finish-load', () => {
+    if (!mediaSetupDone && trustedURL(contents.getURL())) requestMedia(['audio', 'video']);
   });
-  window.webContents.on('did-start-navigation', details => {
+  contents.on('did-start-navigation', details => {
     if (details.isMainFrame && !details.isSameDocument) { permissionGeneration++; pendingBlobDownload = undefined; }
   });
   window.on('page-title-updated', event => { event.preventDefault(); window.setTitle(TITLE); });
   const openLink = value => {
-    if (window.isDestroyed() || !trustedURL(window.webContents.getURL())) return;
+    if (window.isDestroyed() || !trustedURL(contents.getURL())) return;
     let url;
     try { url = new URL(value); } catch { return; }
     if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) return;
     shell.openExternal(url.href).catch(() => openFailure('Impossible d’ouvrir le lien dans votre navigateur'));
   };
   const downloadBlob = value => {
-    if (window.isDestroyed() || !trustedURL(window.webContents.getURL()) || pendingBlobDownload) return;
+    if (window.isDestroyed() || !trustedURL(contents.getURL()) || pendingBlobDownload) return;
     let url;
     try { url = new URL(value); } catch { return; }
     if (url.protocol !== 'blob:' || !trustedURL(url.origin)) return;
     pendingBlobDownload = url.href;
-    try { window.webContents.downloadURL(url.href); }
+    try { contents.downloadURL(url.href); }
     catch { pendingBlobDownload = undefined; openFailure('Impossible de télécharger la pièce jointe'); }
   };
-  window.webContents.setWindowOpenHandler(({ url }) => {
+  contents.setWindowOpenHandler(({ url }) => {
     downloadBlob(url); openLink(url);
     return { action: 'deny' };
   });
-  window.webContents.on('will-frame-navigate', event => {
+  contents.on('will-frame-navigate', event => {
     if (event.isMainFrame && !trustedURL(event.url)) {
       event.preventDefault();
-      if (event.initiator === window.webContents.mainFrame && trustedURL(event.initiator.url)) {
+      if (event.initiator === contents.mainFrame && trustedURL(event.initiator.url)) {
         downloadBlob(event.url); openLink(event.url);
       }
     }
   });
-  window.webContents.on('will-redirect', event => {
+  contents.on('will-redirect', event => {
     if (event.isMainFrame && !trustedURL(event.url)) event.preventDefault();
   });
-  window.webContents.on('will-attach-webview', event => event.preventDefault());
+  contents.on('will-attach-webview', event => event.preventDefault());
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: 'Application', submenu: [
-      { label: 'Recharger', accelerator: 'CommandOrControl+R', click: () => window.webContents.reload() },
+      { label: 'Recharger', accelerator: 'CommandOrControl+R', click: () => contents.reload() },
       { label: 'À propos', click: () => process.stdout.write('about\n') },
       { label: 'Autoriser le microphone…', accelerator: 'CommandOrControl+Shift+M', click: () => requestMedia(['audio']) },
       { label: 'Autoriser le microphone et la caméra…', accelerator: 'CommandOrControl+Shift+V', click: () => requestMedia(['audio', 'video']) },
+      { label: 'Autoriser les notifications…', click: () => {
+        requestPermission(contents, 'notifications', allowed => { if (allowed) contents.reload(); },
+          { isMainFrame: true, requestingUrl: contents.getURL() });
+      } },
+      { label: 'Désactiver les notifications et recharger', click: () => {
+        mediaGrants.delete('notifications'); permissionGeneration++;
+        try { saveMediaGrants(mediaGrants); }
+        catch { openFailure('Impossible de mémoriser ce choix', 'Les notifications peuvent revenir au prochain lancement. Vérifiez les droits du dossier de session, puis réessayez.'); }
+        contents.reload();
+      } },
       { label: 'Révoquer les autorisations audio/vidéo et recharger', click: () => {
-        mediaGrants.clear(); permissionGeneration++;
+        for (const type of ['audio', 'video', 'speaker']) mediaGrants.delete(type);
+        permissionGeneration++;
         try { saveMediaGrants(mediaGrants); }
         catch {
           try { fs.unlinkSync(permissionFile); mediaSetupDone = true; }
@@ -275,7 +322,7 @@ async function boot() {
             openFailure('Révocation limitée à cette session', 'Les anciennes autorisations restent sur disque et peuvent revenir au prochain lancement. Vérifiez les droits du dossier de session, puis réessayez la révocation.');
           }
         }
-        window.webContents.reload();
+        contents.reload();
       } },
       { type: 'separator' },
       { label: 'Quitter', accelerator: 'CommandOrControl+Q', click: () => app.quit() },
@@ -293,12 +340,12 @@ async function boot() {
       buttons: ['Réessayer', 'Quitter'], defaultId: 0, cancelId: 1,
     });
     retryDialog = false;
-    if (response === 0) window.loadURL(HOME).catch(() => {}); else app.quit();
+    if (response === 0) contents.loadURL(HOME).catch(() => {}); else app.quit();
   }
-  window.webContents.on('did-fail-load', (_event, code, _description, _url, mainFrame) => {
+  contents.on('did-fail-load', (_event, code, _description, _url, mainFrame) => {
     if (mainFrame && code !== -3) loadFailure();
   });
-  window.webContents.on('render-process-gone', () => loadFailure());
+  contents.on('render-process-gone', () => loadFailure());
 
   // Only isolated debug smoke runs request this report. Account content never leaves the renderer.
   const reportPath = process.env.WA_SMOKE_REPORT;
@@ -309,11 +356,11 @@ async function boot() {
     await browserSession.cookies.set({ url: cookieURL, name: 'wa-profile-check', value: 'test-only', expirationDate: Date.now() / 1000 + 86400, secure: true });
     await browserSession.cookies.flushStore();
     let reported = false;
-    window.webContents.on('did-finish-load', async () => {
+    contents.on('did-finish-load', async () => {
       if (reported) return;
       reported = true;
       try {
-        const page = await window.webContents.executeJavaScript(`new Promise(resolve => {
+        const page = await contents.executeJavaScript(`new Promise(resolve => {
           let observer, timeout;
           const snapshot = () => ({
             authentic: location.origin === 'https://web.whatsapp.com',
@@ -330,16 +377,24 @@ async function boot() {
           timeout = setTimeout(finish, 30000);
           check();
         })`);
-        const preferences = window.webContents.getLastWebPreferences();
-        const result = { ...page, persisted, native_title: window.getTitle(), sandbox: preferences.sandbox, context_isolation: preferences.contextIsolation, node_integration: preferences.nodeIntegration, preload: Boolean(preferences.preload), hardware_acceleration: app.isHardwareAccelerationEnabled(), electron: process.versions.electron, chromium: process.versions.chrome, browser_pid: process.pid, renderer_pid: window.webContents.getOSProcessId() };
+        const preferences = contents.getLastWebPreferences();
+        const result = { ...page, persisted, native_title: window.getTitle(), sandbox: preferences.sandbox, context_isolation: preferences.contextIsolation, node_integration: preferences.nodeIntegration, preload: Boolean(preferences.preload), hardware_acceleration: app.isHardwareAccelerationEnabled(), electron: process.versions.electron, chromium: process.versions.chrome, browser_pid: process.pid, renderer_pid: contents.getOSProcessId() };
         fs.writeFileSync(reportPath, JSON.stringify(result), { flag: 'wx', mode: 0o600 });
       } catch { process.stderr.write('Smoke report unavailable\n'); }
     });
   }
-  window.loadURL(HOME).catch(() => {});
+  contents.loadURL(HOME).catch(() => {});
 }
 
 module.exports = { trustedURL, chromiumUserAgent, WEB_PREFERENCES };
 if (process.versions.electron && process.type === 'browser') {
   boot().catch(() => { process.stderr.write('Chromium startup failed\n'); process.exit(1); });
+} else if (process.versions.electron && process.type === 'renderer') {
+  // Only the local title bar loads this preload. WhatsApp receives no native bridge.
+  const { ipcRenderer } = require('electron');
+  window.addEventListener('DOMContentLoaded', () => {
+    for (const action of ['minimize', 'maximize', 'close']) {
+      document.getElementById(action)?.addEventListener('click', () => ipcRenderer.send('window-control', action));
+    }
+  });
 }

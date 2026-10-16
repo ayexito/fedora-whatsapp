@@ -12,24 +12,42 @@ async function runtimeHarness(t, respond = async () => ({ response: 1 }), option
   const profile = options.profile || fs.mkdtempSync(path.join(os.tmpdir(), 'whatsapp-permissions-'));
   if (!options.profile) t.after(() => fs.rmSync(profile, { recursive: true, force: true }));
   const handlers = {}, prompts = [], menus = [], failures = [], revealed = [], links = [], opened = [], downloadURLs = [];
-  let window;
+  let window, view;
+  const makeContents = () => Object.assign(new EventEmitter(), {
+    url: '', destroyed: false, reloads: 0, mainFrame: { url: '' },
+    getURL() { return this.url; }, isDestroyed() { return this.destroyed; },
+    setWindowOpenHandler(fn) { this.popup = fn; }, reload() { this.reloads++; },
+    downloadURL(url) { downloadURLs.push(url); }, focus() {},
+    async loadURL(url) { this.url = url; this.mainFrame.url = url; },
+    close() { this.destroyed = true; },
+  });
   class Window extends EventEmitter {
     constructor(options) {
       super(); window = this;
       this.options = options;
-      const mainFrame = { url: 'https://web.whatsapp.com/' };
-      this.webContents = Object.assign(new EventEmitter(), {
-        url: '', destroyed: false, reloads: 0, mainFrame,
-        getURL() { return this.url; }, isDestroyed() { return this.destroyed; },
-        setWindowOpenHandler(fn) { handlers.popup = fn; }, reload() { this.reloads++; },
-        downloadURL(url) { downloadURLs.push(url); },
-      });
+      this.webContents = makeContents();
+      this.contentView = { addChildView() {} };
+      this.size = [1280, 820]; this.maximized = false; this.minimized = false; this.closed = false;
     }
-    isDestroyed() { return this.webContents.destroyed; }
-    isMinimized() { return false; }
+    isDestroyed() { return this.closed; }
+    isMinimized() { return this.minimized; }
+    isMaximized() { return this.maximized; }
+    getContentSize() { return this.size; }
+    minimize() { this.minimized = true; }
+    restore() { this.minimized = false; }
+    maximize() { this.maximized = true; }
+    unmaximize() { this.maximized = false; }
+    close() { this.closed = true; this.emit('closed'); }
     show() {}
     focus() {}
-    async loadURL(url) { this.webContents.url = url; }
+    async loadURL(url) { return this.webContents.loadURL(url); }
+  }
+  class Client {
+    constructor(options) {
+      view = this; this.options = options; this.webContents = makeContents();
+      this.webContents.setWindowOpenHandler = fn => { handlers.popup = fn; };
+    }
+    setBounds(bounds) { this.bounds = bounds; }
   }
   const electron = {
     app: Object.assign(new EventEmitter(), {
@@ -38,7 +56,7 @@ async function runtimeHarness(t, respond = async () => ({ response: 1 }), option
       getPath: () => path.join(profile, 'downloads'),
       requestSingleInstanceLock: () => true, whenReady: async () => {},
     }),
-    BrowserWindow: Window,
+    BrowserWindow: Window, WebContentsView: Client, ipcMain: new EventEmitter(),
     session: { defaultSession: Object.assign(new EventEmitter(), {
       setPermissionCheckHandler(fn) { handlers.check = fn; },
       setPermissionRequestHandler(fn) { handlers.request = fn; },
@@ -55,7 +73,7 @@ async function runtimeHarness(t, respond = async () => ({ response: 1 }), option
   };
   const stdin = Object.assign(new EventEmitter(), { setEncoding() {} });
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../runtime/main.cjs'), 'utf8'), {
-    require: name => name === 'electron' ? electron : require(name), module: { exports: {} }, URL,
+    require: name => name === 'electron' ? electron : require(name), module: { exports: {} }, URL, __filename: '/fixture/runtime.cjs',
     process: Object.assign(new EventEmitter(), {
       env: { WA_PROFILE: profile, WA_DESKTOP_ID: 'test.WhatsApp' },
       versions: { electron: '44.7.2' }, type: 'browser', stdin,
@@ -64,14 +82,15 @@ async function runtimeHarness(t, respond = async () => ({ response: 1 }), option
   });
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(failures, [], 'Runtime failed to start in the permission fixture');
-  return { handlers, prompts, menus, window, stdin, revealed, links, opened, profile, downloadURLs,
+  return { handlers, prompts, menus, window, view, contents: view.webContents, ipc: electron.ipcMain,
+    stdin, revealed, links, opened, profile, downloadURLs,
     navigate(url, extra = {}, name = 'will-frame-navigate') {
-      const event = { url, isMainFrame: true, initiator: window.webContents.mainFrame,
+      const event = { url, isMainFrame: true, initiator: view.webContents.mainFrame,
         prevented: false, preventDefault() { this.prevented = true; }, ...extra };
-      window.webContents.emit(name, event);
+      view.webContents.emit(name, event);
       return event;
     },
-    download(options = {}, contents = window.webContents) {
+    download(options = {}, contents = view.webContents) {
       const item = Object.assign(new EventEmitter(), {
         getInitiatorOrigin: () => 'https://web.whatsapp.com',
         getURL: () => 'https://web.whatsapp.com/file', getMimeType: () => 'application/pdf',
@@ -82,12 +101,12 @@ async function runtimeHarness(t, respond = async () => ({ response: 1 }), option
       electron.session.defaultSession.emit('will-download', event, item, contents);
       return { item, event };
     },
-    request(permission, details = {}, contents = window.webContents) {
+    request(permission, details = {}, contents = view.webContents) {
       return new Promise(resolve => handlers.request(contents, permission, resolve, {
         isMainFrame: true, requestingUrl: 'https://web.whatsapp.com/', ...details,
       }));
     },
-    check(permission, details = {}, origin = 'https://web.whatsapp.com', contents = window.webContents) {
+    check(permission, details = {}, origin = 'https://web.whatsapp.com', contents = view.webContents) {
       return handlers.check(contents, permission, origin, {
         isMainFrame: true, requestingUrl: 'https://web.whatsapp.com/', ...details,
       });
@@ -124,6 +143,75 @@ test('remote pages have no native runtime access', () => {
   assert.equal('preload' in WEB_PREFERENCES, false);
 });
 
+test('the app supplies its own window controls when the desktop omits them', async t => {
+  const app = await runtimeHarness(t);
+  assert.equal(app.window.options.frame, false);
+  assert.equal(JSON.stringify(app.view.options.webPreferences), JSON.stringify(WEB_PREFERENCES));
+  assert.equal('preload' in app.view.options.webPreferences, false);
+  const html = decodeURIComponent(app.window.webContents.getURL().split(',').slice(1).join(','));
+  for (const action of ['minimize', 'maximize', 'close']) assert.ok(html.includes(`id="${action}"`));
+  assert.equal(app.view.bounds.y, 40);
+});
+
+test('official web notifications ask consent and remember permission', async t => {
+  const app = await runtimeHarness(t);
+  assert.equal(await app.request('notifications'), true);
+  assert.equal(app.check('notifications'), true);
+  const restarted = await runtimeHarness(t, undefined, { profile: app.profile });
+  assert.equal(restarted.check('notifications'), true);
+  restarted.menus[0][0].submenu.find(item => item.label?.startsWith('Désactiver les notifications')).click();
+  assert.equal(restarted.check('notifications'), false);
+  const disabled = await runtimeHarness(t, undefined, { profile: app.profile });
+  assert.equal(disabled.check('notifications'), false);
+  for (const details of [{ isMainFrame: false }, { requestingUrl: 'https://evil.test/' }]) {
+    assert.equal(await disabled.request('notifications', details), false);
+  }
+  assert.equal(await disabled.request('notifications', {}, disabled.window.webContents), false);
+  const denied = await runtimeHarness(t, async () => ({ response: 0 }));
+  assert.equal(await denied.request('notifications'), false);
+  assert.equal(denied.check('notifications'), false);
+});
+
+test('window controls accept commands only from the local title bar main frame', async t => {
+  const app = await runtimeHarness(t);
+  const trusted = { sender: app.window.webContents, senderFrame: app.window.webContents.mainFrame };
+  for (const event of [{ sender: app.contents, senderFrame: app.contents.mainFrame },
+    { ...trusted, senderFrame: { url: app.window.webContents.getURL() } }, { ...trusted, senderFrame: null }]) {
+    app.ipc.emit('window-control', event, 'close');
+    assert.equal(app.window.closed, false);
+  }
+  app.ipc.emit('window-control', trusted, 'unknown');
+  assert.equal(app.window.closed, false);
+  app.ipc.emit('window-control', trusted, 'minimize');
+  assert.equal(app.window.minimized, true);
+  app.ipc.emit('window-control', trusted, 'maximize');
+  assert.equal(app.window.maximized, true);
+  app.ipc.emit('window-control', trusted, 'maximize');
+  assert.equal(app.window.maximized, false);
+  app.window.size = [900, 650]; app.window.emit('resize');
+  assert.deepEqual(JSON.parse(JSON.stringify(app.view.bounds)), { x: 0, y: 40, width: 900, height: 610 });
+  app.ipc.emit('window-control', trusted, 'close');
+  assert.equal(app.window.closed, true);
+  assert.equal(app.contents.destroyed, true);
+});
+
+test('local title bar preload binds accessible buttons without exposing a renderer API', () => {
+  const buttons = Object.fromEntries(['minimize', 'maximize', 'close'].map(id => [id, new EventEmitter()]));
+  for (const button of Object.values(buttons)) button.addEventListener = button.on;
+  const localWindow = new EventEmitter(); localWindow.addEventListener = localWindow.on;
+  const sent = [];
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../runtime/main.cjs'), 'utf8'), {
+    module: { exports: {} }, process: { versions: { electron: '44.7.2' }, type: 'renderer' }, window: localWindow,
+    document: { getElementById: id => buttons[id] },
+    require: name => { assert.equal(name, 'electron'); return { ipcRenderer: { send: (...args) => sent.push(args) } }; },
+  });
+  localWindow.emit('DOMContentLoaded');
+  for (const button of Object.values(buttons)) button.emit('click');
+  assert.deepEqual(sent, ['minimize', 'maximize', 'close'].map(action => ['window-control', action]));
+  assert.equal(localWindow.ipcRenderer, undefined);
+  assert.equal(localWindow.windowControls, undefined);
+});
+
 test('WhatsApp attachments reach the native save dialog instead of being cancelled', async t => {
   const app = await runtimeHarness(t);
   const { item, event } = app.download();
@@ -142,10 +230,10 @@ test('downloads require the official initiator and main application window', asy
   }
   assert.equal(app.download({}, null).event.prevented, true);
   assert.equal(app.download({}, { getURL: () => 'https://web.whatsapp.com/' }).event.prevented, true);
-  app.window.webContents.url = 'https://evil.test/';
+  app.contents.url = 'https://evil.test/';
   assert.equal(app.download().event.prevented, true);
-  app.window.webContents.url = 'https://web.whatsapp.com/';
-  app.window.webContents.destroyed = true;
+  app.contents.url = 'https://web.whatsapp.com/';
+  app.contents.destroyed = true;
   assert.equal(app.download().event.prevented, true);
 });
 
@@ -199,7 +287,7 @@ test('native controls can request consent without a web permission request', asy
       assert.equal(app.prompts.length, 1, 'The native control must open a consent dialog');
       assert.equal(app.check('media', { mediaType: 'audio' }), response === 1);
       assert.equal(app.check('media', { mediaType: 'video' }), response === 1 && source !== 'microphone');
-      assert.equal(app.window.webContents.reloads, response);
+      assert.equal(app.contents.reloads, response);
     }
   }
 });
@@ -226,7 +314,7 @@ test('denying or closing a failed prompt never grants media access', async t => 
 
 test('other origins, frames, permissions and malformed media requests stay blocked', async t => {
   const app = await runtimeHarness(t);
-  for (const permission of ['notifications', 'geolocation', 'display-capture', 'usb', 'clipboard-read']) {
+  for (const permission of ['geolocation', 'display-capture', 'usb', 'clipboard-read']) {
     assert.equal(await app.request(permission), false);
   }
   for (const mediaTypes of [undefined, [], ['unknown'], ['speaker'], ['audio', 'unknown']]) {
@@ -236,18 +324,18 @@ test('other origins, frames, permissions and malformed media requests stay block
     assert.equal(await app.request('media', { mediaTypes: ['audio'], ...details }), false);
   }
   assert.equal(await app.request('media', { mediaTypes: ['audio'] }, null), false);
-  app.window.webContents.url = 'https://evil.test/';
+  app.contents.url = 'https://evil.test/';
   assert.equal(await app.request('media', { mediaTypes: ['audio'] }), false);
   app.stdin.emit('data', 'media\n');
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(app.prompts.length, 0);
-  app.window.webContents.url = 'https://web.whatsapp.com/';
+  app.contents.url = 'https://web.whatsapp.com/';
   assert.equal(await app.request('media', { mediaTypes: ['audio'] }), true);
   assert.equal(app.check('media', { mediaType: 'audio' }, 'https://evil.test'), false);
   assert.equal(app.check('media', { mediaType: 'audio', securityOrigin: 'https://evil.test' }), false);
   assert.equal(app.check('media', { mediaType: 'audio', isMainFrame: false }), false);
   assert.equal(app.handlers.device({ origin: 'https://web.whatsapp.com' }), false);
-  app.window.webContents.destroyed = true;
+  app.contents.destroyed = true;
   assert.equal(app.check('media', { mediaType: 'audio' }), false);
 });
 
@@ -259,7 +347,7 @@ test('duplicate requests share the grant, and the native revoke action clears it
   assert.equal(app.prompts.length, 1);
   app.menus[0][0].submenu.find(item => item.label?.startsWith('Révoquer')).click();
   assert.equal(app.check('media', { mediaType: 'audio' }), false);
-  assert.equal(app.window.webContents.reloads, 1);
+  assert.equal(app.contents.reloads, 1);
   assert.equal(await app.request('media', { mediaTypes: ['audio'] }), true);
   assert.equal(app.prompts.length, 2);
 });
@@ -271,7 +359,7 @@ test('navigation or revocation invalidates an outstanding consent dialog', async
     const request = app.request('media', { mediaTypes: ['audio'] });
     await new Promise(resolve => setImmediate(resolve));
     if (revoke) app.menus[0][0].submenu.find(item => item.label?.startsWith('Révoquer')).click();
-    else app.window.webContents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
+    else app.contents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
     answer({ response: 1 });
     assert.equal(await request, false);
     assert.equal(app.check('media', { mediaType: 'audio' }), false);
@@ -285,7 +373,7 @@ test('external links open once in the default browser while the app stays on Wha
   assert.equal(app.navigate('http://example.org/').prevented, true);
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(app.links, [url, 'http://example.org/']);
-  assert.equal(app.window.webContents.getURL(), 'https://web.whatsapp.com/');
+  assert.equal(app.contents.getURL(), 'https://web.whatsapp.com/');
   assert.equal(app.navigate('https://web.whatsapp.com/').prevented, false);
 });
 
@@ -298,7 +386,7 @@ test('dangerous schemes, subframe navigations and redirects never launch native 
   }
   app.navigate('https://example.org/', { initiator: { url: 'https://evil.test/' } });
   app.navigate('https://example.org/', {}, 'will-redirect');
-  app.window.webContents.url = 'https://evil.test/';
+  app.contents.url = 'https://evil.test/';
   app.handlers.popup({ url: 'https://example.org/' });
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(app.links, []);
@@ -340,13 +428,13 @@ test('native opener failures produce a useful error instead of disappearing', as
 
 test('first-run media setup is discoverable and explicit grants survive restarts', async t => {
   const app = await runtimeHarness(t);
-  app.window.webContents.emit('did-finish-load');
+  app.contents.emit('did-finish-load');
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(app.prompts.length, 1, 'Show native consent even when WhatsApp never requests it');
   assert.equal(app.check('media', { mediaType: 'audio' }), true);
   assert.equal(app.check('media', { mediaType: 'video' }), true);
   const restarted = await runtimeHarness(t, undefined, { profile: app.profile });
-  restarted.window.webContents.emit('did-finish-load');
+  restarted.contents.emit('did-finish-load');
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(restarted.check('media', { mediaType: 'audio' }), true);
   assert.equal(restarted.prompts.length, 0);
@@ -358,11 +446,11 @@ test('first-run media setup is discoverable and explicit grants survive restarts
 
 test('declined setup does not nag again, unsafe stored grants and spoofed security origins fail closed', async t => {
   const app = await runtimeHarness(t, async () => ({ response: 0 }));
-  app.window.webContents.emit('did-finish-load');
+  app.contents.emit('did-finish-load');
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(app.prompts.length, 1);
   const restarted = await runtimeHarness(t, undefined, { profile: app.profile });
-  restarted.window.webContents.emit('did-finish-load');
+  restarted.contents.emit('did-finish-load');
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(restarted.prompts.length, 0);
   assert.equal(restarted.check('media', { mediaType: 'audio' }), false);
@@ -389,7 +477,7 @@ test('official blob document popups reach Save with one scoped download authoriz
   assert.match(accepted.item.saveOptions.defaultPath, /\.pdf$/);
   assert.equal(app.download(blob).event.prevented, true, 'An empty initiator exception must be one-shot');
   app.handlers.popup({ url });
-  app.window.webContents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
+  app.contents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
   assert.equal(app.download(blob).event.prevented, true, 'Navigation invalidates authorization');
   app.handlers.popup({ url });
   assert.equal(app.download({ ...blob, getInitiatorOrigin: () => 'https://evil.test' }).event.prevented, true);
